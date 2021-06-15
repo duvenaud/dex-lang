@@ -42,7 +42,6 @@ def firstbit  (x:Word8) : Bool = W8ToB' $ x .&. (IToW8 1)
 def secondbit (x:Word8) : Bool = W8ToB' $ x .&. (IToW8 2)
 def thirdbit  (x:Word8) : Bool = W8ToB' $ x .&. (IToW8 4)
 
-def last : n = ((size n) - 1)@n
 def ixFraction (i:n) : Float = (IToF (ordinal i)) / (IToF ((size n) - 1))
 
 -- :p for i:(Fin 10). ixFraction i
@@ -70,7 +69,8 @@ data Axis =
 --Octants = Directions=>Bool
 Octant = Fin 8 -- (Bool & Bool & Bool)  -- positive in x, y, or z
 
-LoD = Fin 5
+LoD = Int
+maxLoD = 5
 
 --def Voxel (lod:LoD) : Type =
 --  (Fin lod)=>Octants
@@ -88,7 +88,7 @@ def AABox : Type = (Position & Position)  -- opposite corners
 
 def voxelWidth (lod: LoD) : Float = 
   -- voxels divide up cube in (-1, 1)
-  numDivisions = intpow2 $ ordinal lod
+  numDivisions = intpow2 lod
   2.0 / (IToF numDivisions)
 
 def voxelToCentrePosition (lod: LoD) (voxel: Voxel) : Position =
@@ -184,9 +184,10 @@ def subdivide (ray:Ray) (lod: LoD) ((AsList _ voxels) : List Voxel) : List Voxel
 def rayTraceOctTree (ray: Ray) : List Voxel =
   -- Returns a depth-ordered list of voxels intersecting a ray.
   top_voxel = (0, 0, 0)
-  update = subdivide ray
   init = AsList 1 [top_voxel]
-  fold init update
+  yieldState init \ls_ref.
+    for lod:(Fin maxLoD).
+      subdivide ray (ordinal lod) (get ls_ref)
 
 
 rayvoxels = rayTraceOctTree ([0.1, 0.1, 0.1], [1.0, 1.0, 1.0])
