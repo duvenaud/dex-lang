@@ -151,6 +151,7 @@ octantBackToFrontTable : Octant=>Octant=>Octant =
   for i j. (intTable.i.j@Octant)
 
 def childOctantToSubVoxel (lod: LoD) (voxel: Voxel) (oct:Octant) : Voxel =
+  -- todo: lod unused
   oo = IToW8 $ ordinal oct
   (x, y, z) = voxel
   (2 * x + (BToI $ firstbit oo),
@@ -167,11 +168,15 @@ def subVoxelPosToChildOctant (lod: LoD) (voxel: Voxel) (pos:Position) : Octant =
   bits@Octant
 
 def orderedChildren (lod: LoD) (ray:Ray) (voxel: Voxel) : List Octant =
-  -- todo: return only those children that intersect
   (pos, dir) = ray
   oct = subVoxelPosToChildOctant lod voxel pos
   childOcts = octantBackToFrontTable oct
-  (AsList _ childOcts)
+  yieldAccum (ListMonoid Octant) \list.
+    for t.
+      childVoxel = childOctantToSubVoxel lod voxel childOcts.t
+      childLoD = lod+1
+      if intersectsVoxel childLoD ray childVoxel then
+        list += AsList 1 [childOcts.t]
 
 
 def subdivide (ray:Ray) (lod: LoD) ((AsList _ voxels) : List Voxel) : List Voxel =
@@ -179,9 +184,8 @@ def subdivide (ray:Ray) (lod: LoD) ((AsList _ voxels) : List Voxel) : List Voxel
   -- Todo: Encode this in the types.
   yieldAccum (ListMonoid Voxel) \list.
     for t.
-      if intersectsVoxel lod ray voxels.t then
-        (AsList _ childOcts) = orderedChildren lod ray voxels.t
-        list += AsList _ for i. childOctantToSubVoxel lod voxels.t childOcts.i
+      (AsList _ childOcts) = orderedChildren lod ray voxels.t
+      list += AsList _ for i. childOctantToSubVoxel lod voxels.t childOcts.i
 
 def rayTraceOctTree (ray: Ray) : List Voxel =
   -- Returns a depth-ordered list of voxels intersecting a ray.
