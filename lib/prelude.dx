@@ -47,6 +47,7 @@ def IToF (x:Int) : Float = internalCast _ x
 def FToI (x:Float) : Int = internalCast _ x
 def I64ToRawPtr (x:Int64 ) : RawPtr = internalCast _ x
 def RawPtrToI64 (x:RawPtr) : Int64  = internalCast _ x
+
 '## Bitwise operations
 
 interface Bits a
@@ -1564,14 +1565,57 @@ def threeFry2x32 (k:Word64) (count:Word64) : Word64 =
 
   (W32ToW64 x .<<. 32) .|. (W32ToW64 y)
 
-def hash (x:Key) (y:Int32) : Key =
-  y64 = IToW64 y
-  threeFry2x32 x y64
+interface Hashable a
+  hash : Key -> a -> Key
+
+instance Hashable Int32
+  hash = \key y.
+    y64 = IToW64 y
+    threeFry2x32 key y64
+
+instance Hashable Float32
+  hash = \key y.
+    y64 = IToW64 $ FToI y
+    threeFry2x32 key y64
+
+instance Hashable (Fin n)
+  -- Todo: This should be the instance for the Idx typeclass.
+  hash = \key y.
+    y64 = IToW64 (ordinal y)
+    threeFry2x32 key y64
+
+instance [Hashable a] Hashable (Maybe a)
+  hash = \key x. case x of
+    Nothing -> hash (IToW64 0) 0
+    Just x  -> hash (IToW64 1) x
+
+instance [Hashable a] Hashable (n=>a)
+  hash = \key table.
+    fold key \i k. hash k table.i
+
+instance [Hashable a, Hashable b] Hashable (a & b)
+  hash = \key (left, right).
+    hash (hash key left) right
+
+instance [Hashable a, Hashable b] Hashable (a | b)
+  hash = \key lor. case lor of
+    Left  lor -> hash (IToW64 0) lor
+    Right lor -> hash (IToW64 1) lor
+
+
+
 def newKey (x:Int) : Key = hash (IToW64 0) x
 def many (f:Key->a) (k:Key) (i:n) : a = f (hash k (ordinal i))
 def ixkey (k:Key) (i:n) : Key = hash k (ordinal i)
-def ixkey2 (k:Key) (i:n) (j:m) : Key = hash (hash k (ordinal i)) (ordinal j)
+def ixkey2 (k:Key) (i:n) (j:m) : Key = hash k (ordinal i, ordinal j)
 def splitKey (k:Key) : Fin n => Key = for i. ixkey k i
+
+
+:p hash (newKey 0) (3, 4)
+:p hash (newKey 1) (3, 4)
+:p hash (newKey 0) (4, 3)
+:p hash (newKey 0) [4, 3]
+:p hash (newKey 0) (Just 4)
 
 '### Sample Generators
 These functions generate samples taken from, different distributions.
