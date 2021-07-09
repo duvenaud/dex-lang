@@ -236,21 +236,23 @@ const : a -> b -> a = \x _. x
 
 '## Vector spaces
 
-interface [Add a] VSpace a
-  scaleVec : Float -> a -> a
+interface [Add a, Add s, Mul s, Fractional s] VSpace a s
+  scaleVec : s -> a -> a
 
-def (.*) [VSpace a] : Float -> a -> a = scaleVec
-def (*.) [VSpace a] : a -> Float -> a = flip scaleVec
-def (/)  [VSpace a] (v:a) (s:Float) : a = divide 1.0 s .* v
-def neg  [VSpace a] (v:a) : a = (-1.0) .* v
+def (.*) [VSpace a s] : s -> a -> a = scaleVec
+def (*.) [VSpace a s] : a -> s -> a = flip scaleVec
+def (/)  [VSpace a s] (v:a) (sca:s) : a = divide one sca .* v
+def neg  [VSpace a s] (v:a) : a =
+  i:s = sub one zero
+  i .* v
 
-instance VSpace Float
+instance VSpace Float Float
   scaleVec = \x y. x * y
 
-instance [VSpace a] VSpace (n=>a)
-  scaleVec = \s xs. for i. s .* xs.i
+instance [VSpace a s] VSpace (n=>a) s
+  scaleVec = \sca xs. for i. sca .* xs.i
 
-instance VSpace Unit
+instance [Add s, Mul s, Fractional s] VSpace Unit s
   scaleVec = \_ _. ()
 
 '## Boolean type
@@ -811,8 +813,10 @@ def scan' (init:a) (body:n->a->a) : n=>a = snd $ scan init \i x. dup (body i x)
 def fsum (xs:n=>Float) : Float = yieldAccum (AddMonoid Float) \ref. for i. ref += xs i
 def sum  [Add v] (xs:n=>v) : v = reduce zero (+) xs
 def prod [Mul v] (xs:n=>v) : v = reduce one  (*) xs
-def mean [VSpace v] (xs:n=>v) : v = sum xs / IToF (size n)
-def std [Mul v, VSpace v, Floating v] (xs:n=>v) : v = sqrt $ mean (map sq xs) - sq (mean xs)
+def mean [VSpace v s] (xs:n=>v) : v =
+  o:s = one  -- Needed to disambiguate which `one` this is: is it from v or s?
+  sum xs / (sum for i:n. o)
+def std [Mul v, VSpace v s, Floating v] (xs:n=>v) : v = sqrt $ mean (map sq xs) - sq (mean xs)
 def any (xs:n=>Bool) : Bool = reduce False (||) xs
 def all (xs:n=>Bool) : Bool = reduce True  (&&) xs
 
@@ -830,7 +834,7 @@ def linspace (n:Type) (low:Float) (high:Float) : n=>Float =
 
 def transpose (x:n=>m=>a) : m=>n=>a = view i j. x.j.i
 def vdot (x:n=>Float) (y:n=>Float) : Float = fsum view i. x.i * y.i
-def dot [VSpace v] (s:n=>Float) (vs:n=>v) : v = sum for j. s.j .* vs.j
+def dot [VSpace v s] (sca:n=>s) (vs:n=>v) : v = sum for j. sca.j .* vs.j
 
 -- matmul. Better symbol to use? `@`?
 (**) :  (l=>m=>Float) -> (m=>n=>Float) -> (l=>n=>Float) = \x y.
@@ -1793,8 +1797,8 @@ instance Mul Complex
     MkComplex (a * c - b * d) (a * d + b * c)
   one = MkComplex 1.0 0.0
 
-instance VSpace Complex
-  scaleVec = \a:Float (MkComplex c d):Complex. MkComplex (a * c) (a * d)
+instance [Add s, Mul s, Fractional s] VSpace Complex s
+  scaleVec = \a:s (MkComplex c d):Complex. MkComplex (a .* c) (a .* d)
 
 -- Todo: Hook up to (/) operator.  Might require two-parameter VSpace.
 def complex_division (MkComplex a b:Complex) (MkComplex c d:Complex): Complex =
@@ -1835,6 +1839,18 @@ def complex_tanh (MkComplex a b:Complex) : Complex =
 
 instance Fractional Complex
   divide = complex_division
+
+
+a = MkComplex 2.1 0.4
+b = MkComplex (-1.1) 1.3
+:p (a + b - a) ~~ b
+> True
+:p (a * b) ~~ (b * a)
+> True
+:p divide (a * b) a ~~ b
+> True
+-- This next test can be added once we parameterize the field in the VSpace typeclass.
+:p ((a * b) / a) ~~ b
 
 def complex_floor (MkComplex re im:Complex) : Complex =
   -- from "Complex Floor" by Eugene McDonnell
