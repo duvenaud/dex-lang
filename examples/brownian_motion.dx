@@ -1,6 +1,9 @@
 
 import plot
 
+
+'# Virtual Brownian Tree
+
 UnitInterval = Float
 
 def bmIter ((key, y, sigma, t):(Key & Float & Float & UnitInterval)) :
@@ -20,3 +23,115 @@ ys = map (sampleBM (newKey 0)) xs
 
 :html showPlot $ xyPlot xs ys
 > <html output>
+
+
+
+'# Brownian Interval
+
+'## BITree
+
+def (+!) (n:a) (m:Int) : a = ((ordinal n) + m)@_
+def (-!) (x:n) (z:Int) : n = ((ordinal x)-z)@n
+
+data Node node =
+  -- Since every node either has 0 or 2 children, we enforce this at the type level.
+  Branch interval:(UnitInterval & UnitInterval) key:Key parent:(Maybe node) children:(Maybe (node & node))
+
+def BITree (node:Type) : Type =
+  (node=>(Maybe (Node node)) & node)  -- Node array, and pointer to last used node.
+
+def root (tree:BITree node) : node =
+  0@_ -- Convention
+
+def isLeaf ((Branch _ _ _ children):Node node) : Bool = 
+  isNothing children
+
+def isRoot ((Branch _ _ parent _):Node node) : Bool = 
+  isNothing parent
+
+def findIntervalInTree (tree:BITree node) (t:UnitInterval) : node =
+  (nodeArray, _) = tree
+  yieldState (root tree) \nodeRef.
+    iter \_.
+      (Branch _ _ _ children) = fromJust nodeArray.(get nodeRef)
+      case children of
+        Nothing -> Done (get nodeRef)
+        Just (left, right) ->
+          (Branch (_, splitTime) _ _ _) = fromJust nodeArray.left
+          case t < splitTime of
+            True ->
+              nodeRef := left
+              Continue
+            False ->
+              nodeRef := right
+              Continue
+
+
+-- To think about:  This will create a very unbalanced tree.
+
+def insertTime (treeRef: Ref h (BITree node))
+               (t:UnitInterval) : {State h} Unit =
+  tree = get treeRef
+  (nodeArrayRef, lastNodePtrRef) = (fstRef treeRef, sndRef treeRef)
+  cutNode = findIntervalInTree tree t  -- todo: avoid copy?
+  (Branch (start, end) key parent _) = fromJust (get nodeArrayRef!cutNode)
+  alreadyInTree = start == t || end == t
+  case alreadyInTree of
+    True -> ()
+    False ->
+      -- Cut existing node into two.
+      [leftkey, rightkey] = splitKey key 
+      newLeftChild  = Branch (start, t) leftkey  (Just cutNode) Nothing
+      newRightChild = Branch (t, end)   rightkey (Just cutNode) Nothing
+
+      -- Add two nodes to end.
+      -- Todo: Wrap this logic in a data structure.
+      newLeftPr   = get lastNodePtrRef +! 1
+      newRightPtr = get lastNodePtrRef +! 2
+      nodeArrayRef!newLeftPr   := Just newLeftChild
+      nodeArrayRef!newRightPtr := Just newRightChild
+      lastNodePtrRef := get lastNodePtrRef +! 2
+
+      -- Update old leaf to point to its new children.
+      newCutNode = Branch (start, end) key parent (Just (newLeftPr, newRightPtr))
+      nodeArrayRef!cutNode := Just newCutNode
+      ()
+
+def initTree (maxSize:Int) : BITree (Fin maxSize) =
+  root = Branch (0.0, 1.0) (newKey 0) Nothing Nothing
+  nothings = for i. Nothing
+  initArray = yieldState nothings \r. r!(0@_) := Just root
+  (initArray, 0@_)
+
+i = initTree 10
+i' = yieldState i \tr. insertTime tr 0.4
+i'' = yieldState i' \tr. insertTime tr 0.7
+:p i''
+
+def traverse ((start, end):(UnitInterval & UnitInterval)) : List (Node node) =
+  todo
+
+def Bridge (u:Float) (s:Float) (t:Float) (wut:Float) (k:Key) : Float =
+  mean = wut * (s - u) / (t - u)
+  std = (t - s) * ( s - u) / (t - u)
+
+def sample (treeRef: Ref h (BITree node))
+           (t:UnitInterval) : {State h} Unit : Float =
+  -- Todo: replace return value with arbitrary VSpace
+  (nodeArray, _) = tree
+  yieldState (root tree) \nodeRef.
+    iter \_.
+      (Branch interval parent children) = fromJust nodeArray.(get nodeRef)
+      case children of
+        Nothing -> Done (get nodeRef)
+        Just (left, right) ->  -- Decide which child to traverse into.
+          (Branch (_, splitTime) _ _) = fromJust nodeArray.left
+          case t < splitTime of
+            True ->
+              nodeRef := left
+              Continue
+            False ->
+              nodeRef := right
+              Continue
+
+  
