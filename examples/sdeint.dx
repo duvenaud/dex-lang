@@ -60,9 +60,15 @@ def sample_Brownian_motion {v} [VSpace v, HasStandardNormal v]
   (key:Key) (t0:Time) (t1:Time) (t:Time) : v =
   scale_brownian_motion (sample_unit_brownian_motion key) t0 t1 t
 
+ -- TODO: use quadratic spline at lowest level (h/t Patrick)
 
 
 '## SDE Types
+
+-- TODO: Enforce "strongly" Diagonal diffusion only depends on respective element of state. (ht Patrick)
+
+-- TODO: Use PID controller for adaptive solvers (h/t Patrick)
+
 
 
 def Drift              (v:Type) [VSpace v]       : Type = v->Time->v
@@ -198,6 +204,27 @@ def ito_milstein_step {m v} [Commutative m v, OuterProd v, Mul v]
   diffprod = diffusion_grad_product diffusion z t
   z + dt .* (drift z t) + apply (diffusion z t) noise + 0.5 .* (
     ((outer_prod noise noise) diffprod) - (noise * diffprod))
+
+-- dt = drift.contr(t0, t1)
+-- dw = diffusion.contr(t0, t1)
+
+-- f0_prod = drift.vf_prod(t0, y0, args, dt)
+-- g0_prod = diffusion.vf_prod(t0, y0, args, dw)
+
+-- def _to_jvp(_y0):
+--     return diffusion.vf_prod(t0, _y0, args, dw)
+
+-- _, v0_prod = jax.jvp(_to_jvp, (y0,), (g0_prod,))
+-- y1 = (y0**ω + f0_prod**ω + g0_prod**ω + 0.5 * v0_prod**ω).ω
+
+def strat_milstein_step {m v} [Commutative m v, OuterProd v, Mul v]
+    (MkStratSDE drift diffusion: StratSDE m v) (z:v) (t:Time) (dt:Time) (noise:v) : v =
+  -- based on https://github.com/patrick-kidger/diffrax/blob/main/diffrax/solver/milstein.py
+  diffprod = diffusion_grad_product diffusion z t
+  z + dt .* (drift z t) + apply (diffusion z t) noise + 0.5 .* (
+    ((outer_prod noise noise) diffprod) - (noise * diffprod))
+
+
 
 def sdeint {d n m}
     (step_func: SolverStepFunc m (d=>Float))
