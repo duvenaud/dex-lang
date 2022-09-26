@@ -157,7 +157,7 @@ check-watch: dexrt-llvm
 	$(STACK) build $(STACK_FLAGS) --fast --file-watch --ghc-options="-fno-code"
 
 install: dexrt-llvm
-	$(STACK) install $(STACK_BIN_PATH) --flag dex:optimized $(STACK_FLAGS)
+	$(STACK) install $(STACK_BIN_PATH) --flag dex:optimized $(STACK_FLAGS) $(OPT)
 
 build-opt: dexrt-llvm
 	$(STACK) build $(STACK_FLAGS) $(OPT) --flag dex:optimized
@@ -190,38 +190,45 @@ dexrt-llvm: src/lib/dexrt.bc
 
 # --- running tests ---
 
-example-names = mandelbrot pi sierpinski rejection-sampler \
-                regression brownian_motion particle-swarm-optimizer \
-                ode-integrator mcmc ctc raytrace particle-filter \
-                isomorphisms ode-integrator fluidsim \
-                sgd psd kernelregression \
-                quaternions manifold-gradients schrodinger tutorial \
-                latex
+example-names := \
+  mandelbrot pi sierpinski rejection-sampler \
+  regression brownian_motion particle-swarm-optimizer \
+  ode-integrator mcmc ctc raytrace particle-filter \
+  isomorphisms fluidsim \
+  sgd psd kernelregression nn \
+  quaternions manifold-gradients schrodinger tutorial \
+  latex linear-maps dither
 # TODO: re-enable
 # fft vega-plotting
 
-test-names = uexpr-tests adt-tests type-tests eval-tests show-tests \
-             shadow-tests monad-tests io-tests exception-tests sort-tests \
+# Only test levenshtein-distance on Linux, because MacOS ships with a
+# different (apparently _very_ different) word list.
+ifeq ($(shell uname -s),Linux)
+  example-names += levenshtein-distance
+endif
+
+test-names = uexpr-tests adt-tests type-tests cast-tests eval-tests show-tests \
+             read-tests shadow-tests monad-tests io-tests exception-tests sort-tests \
+             standalone-function-tests algeff-tests \
              ad-tests parser-tests serialize-tests parser-combinator-tests \
              record-variant-tests typeclass-tests complex-tests trig-tests \
-             linalg-tests set-tests fft-tests linearmap-tests
+             linalg-tests set-tests fft-tests stats-tests
 
-lib-names = diagram plot png
+doc-names = conditionals functions
 
-doc-names = functions
+benchmark-names = \
+  fused_sum gaussian jvp_matmul matmul_big matmul_small matvec_big matvec_small \
+  poly vjp_matmul
 
-all-names = $(test-names:%=tests/%) $(example-names:%=examples/%) $(doc-names:%=doc/%)
-
-quine-test-targets = $(all-names:%=run-%)
+quine-test-targets = \
+  $(test-names:%=run-tests/%) \
+  $(example-names:%=run-examples/%) \
+  $(doc-names:%=run-doc/%) \
+  $(benchmark-names:%=run-bench-tests/%)
 
 update-test-targets    = $(test-names:%=update-tests/%)
 update-doc-targets     = $(doc-names:%=update-doc/%)
 update-example-targets = $(example-names:%=update-examples/%)
-
-pages-doc-names = $(doc-names:%=pages/%.html)
-pages-example-names = $(example-names:%=pages/examples/%.html)
-
-pages-lib-names = $(lib-names:%=pages/lib/%.html)
 
 t10k-images-idx3-ubyte-sha256 = 346e55b948d973a97e58d2351dde16a484bd415d4595297633bb08f03db6a073
 t10k-labels-idx1-ubyte-sha256 = 67da17c76eaffca5446c3361aaab5c3cd6d1c2608764d35dfb1850b086bf8dd5
@@ -239,14 +246,33 @@ $(tutorial-data):
 .PHONY: tutorial-data
 tutorial-data: $(tutorial-data)
 
-run-examples/tutorial: tutorial-data 
+run-examples/tutorial: tutorial-data
+update-examples/tutorial: tutorial-data
 
-tests: unit-tests lower-tests quine-tests repl-test module-tests
+camera-sha256 = c5c69e1bf02f219b6e1c12c13405671425aa1c4dc130c1c380e7416a064341bc
+dither-data = camera
+dither-data := $(dither-data:%=examples/%)
+
+$(dither-data):
+	wget -qO $@.ppm https://gist.github.com/niklasschmitz/03be29c2850ac3bbdf6ce86229b71d8f/raw/300962b117fe8595913fb1f35db546b53974576c/$(@F).ppm
+	@echo $($(@F)-sha256) $@.ppm > $@.sha256
+	sha256sum -c $@.sha256
+	$(RM) $@.sha256
+
+.PHONY: dither-data
+dither-data: $(dither-data)
+run-examples/dither: dither-data
+update-examples/dither: dither-data
+
+tests: opt-tests unit-tests lower-tests quine-tests repl-test module-tests
 
 # Keep the unit tests in their own working directory too, due to
 # https://github.com/commercialhaskell/stack/issues/4977
 unit-tests:
 	$(STACK) test --work-dir .stack-work-test $(STACK_FLAGS)
+
+opt-tests: just-build
+	misc/file-check tests/opt-tests.dx $(dex) -O script
 
 quine-tests: $(quine-test-targets)
 
@@ -254,11 +280,15 @@ run-%: export DEX_ALLOW_CONTRACTIONS=0
 run-%: export DEX_TEST_MODE=t
 
 run-tests/%: tests/%.dx just-build
-	misc/check-quine $< $(dex) script
+	misc/check-quine $< $(dex) -O script
 run-doc/%: doc/%.dx just-build
 	misc/check-quine $< $(dex) script
 run-examples/%: examples/%.dx just-build
-	misc/check-quine $< $(dex) script
+	misc/check-quine $< $(dex) -O script
+# This runs the benchmark in test mode, which means we're checking
+# that it's not broken, but not actually trying to measure runtimes
+run-bench-tests/%: benchmarks/%.dx just-build
+	misc/check-quine $< $(dex) -O script
 
 lower-tests: export DEX_LOWER=1
 lower-tests: export DEX_ALLOW_CONTRACTIONS=0
@@ -296,7 +326,11 @@ update-examples/%: examples/%.dx just-build
 	$(dex) script $< > $<.tmp
 	mv $<.tmp $<
 
-run-gpu-tests: export DEX_ALLOC_CONTRACTIONS=0
+update-bench-tests/%: benchmarks/%.dx just-build
+	$(dex) script $< > $<.tmp
+	mv $<.tmp $<
+
+run-gpu-tests: export DEX_ALLOW_CONTRACTIONS=0
 run-gpu-tests: tests/gpu-tests.dx just-build
 	misc/check-quine $< $(dex) --backend llvm-cuda script
 
@@ -309,6 +343,9 @@ repl-test: just-build
 	misc/check-no-diff \
 	  tests/repl-multiline-test-expected-output \
 	  <($(dex) repl < tests/repl-multiline-test.dx)
+	misc/check-no-diff \
+	  tests/repl-regression-528-test-expected-output \
+	  <($(dex) repl < tests/repl-regression-528-test.dx)
 
 module-tests: just-build
 	misc/check-quine tests/module-tests.dx \
@@ -332,25 +369,36 @@ bench-summary:
 # --- building docs ---
 
 slow-pages = pages/examples/mnist-nearest-neighbors.html
-# Not actually slow, but not tested because it shows timings
-# https://github.com/google-research/dex-lang/issues/910
-slow-pages += pages/examples/levenshtein-distance.html
 
-docs: pages-prelude $(pages-doc-names) $(pages-example-names) $(pages-lib-names) $(slow-pages)
+doc-files = $(doc-names:%=doc/%.dx)
+pages-doc-files = $(doc-names:%=pages/%.html)
+example-files = $(example-names:%=examples/%.dx)
+pages-example-files = $(example-names:%=pages/examples/%.html)
+
+lib-files = $(filter-out lib/prelude.dx,$(wildcard lib/*.dx))
+pages-lib-files = $(patsubst %.dx,pages/%.html,$(lib-files))
+
+docs: pages-prelude $(pages-doc-files) $(pages-example-files) $(pages-lib-files) $(slow-pages) pages/index.md
 
 pages-prelude: lib/prelude.dx
 	mkdir -p pages
 	$(dex) --prelude /dev/null script lib/prelude.dx --outfmt html > pages/prelude.html
 
+pages/examples/tutorial.html: tutorial-data
+pages/examples/dither.html: dither-data
+
 pages/examples/%.html: examples/%.dx
 	mkdir -p pages/examples
-	$(dex) script $^ --outfmt html > $@
+	$(dex) script $< --outfmt html > $@
 
 pages/lib/%.html: lib/%.dx
 	mkdir -p pages/lib
 	$(dex) script $^ --outfmt html > $@
 
-${pages-doc-names}:pages/%.html: doc/%.dx
+pages/index.md: $(doc-files) $(example-files) $(lib-files)
+	misc/build-web-index "$(doc-files)" "$(example-files)" "$(lib-files)" > $@
+
+${pages-doc-files}:pages/%.html: doc/%.dx
 	mkdir -p pages
 	$(dex) script $^ --outfmt html > $@
 
@@ -358,3 +406,4 @@ clean:
 	$(STACK) clean
 	$(RM) src/lib/dexrt.bc
 	$(RM) $(tutorial-data)
+	$(RM) $(dither-data)
