@@ -10,8 +10,87 @@ representation to another.
 All can be paralellized by the compiler due to the use of the
 `accum` monoid.
 
+
+'# Types
+
+
+data Permuted perm:n=>n [Ix n] =
+  MkPermuted Nat
+
+instance {n} [Ix n] Ix (Permuted n)
+  size = size n
+  ordinal = \(MkPermuted perm i). perm.i
+  unsafe_from_ordinal = \o. MkPermuted perm.(unsafe_from_ordinal n o )
+
+
+
+
+
+'### Directed graphs
+
+-- todo: Enforce uniquenes of edges with sets?
+
+data DirectedEdge node edge_payload [Ix node] =
+  MkDirectedEdge from:node to:node edge_payload
+
+data DirectedGraph node node_payload edge edge_payload [Ix node, Ix edge] =
+  MkDirectedGraph (node=>node_payload) (edge=>(DirectedEdge node edge_payload))
+
+data DirectedEdgeList node node_payload edge_payload [Ix node] =
+  MkEdgeList (List (DirectedEdge node edge_payload))
+
+data DirectedAdjacencyMatrix node node_payload edge_payload [Ix node] =
+  MkDirectedAdjacencyMatrix matrix:(node=>node=>(Maybe edge_payload))
+
+data DirectedAdjacencyLists node node_payload edge_payload [Ix node] =
+  MkChildLists children:(node=>(node_payload & List (edge_payload & node)))
+
+
+'### Directed Acyclic Graphs
+
+data DAGEdge node edge_payload [Ix node] =
+  MkDAGEdge from:node to:(..<from) edge_payload
+
+data DirectedAcyclicGraph node node_payload edge edge_payload [Ix node, Ix edge] =
+  MkDAG ((Permuted node)=>node_payload) (edge=>(DAGEdge node edge_payload))
+
+
+
+
+'### Undirected Graphs
+
+data UndirectedEdge n [Ix n] =  -- Just a dependent pair.
+  MkUndirectedEdge from:n to:(..from)  -- allow self-edges.
+
+data UndirectedGraph a n m [Ix n, Ix m] =
+  MkUndirected nodes:(n=>a) edges:(m=>(UndirectedEdge n))
+
+
+-- Todo: Topological sort
+
+-- https://en.wikipedia.org/wiki/Topological_sorting
+-- One method for doing this is to repeatedly square the adjacency matrix of the given graph, logarithmically many times, using min-plus matrix multiplication with maximization in place of minimization. The resulting matrix describes the longest path distances in the graph. Sorting the vertices by the lengths of their longest incoming paths produces a topological ordering.
+
+def topo_sort {node node_payload edge edge_payload} [Ix node, Ix edge]
+    (graph: DirectedGraph node node_payload edge edge_payload)
+    : Maybe (DirectedAcyclicGraph node node_payload edge edge_payload) =
+  (MkDirectedGraph nodes edges) = graph
+  dag_edges = for i.
+    (MkDirectedEdge from to payload) = edges.i
+    MkDAGEdge from (unsafe_project _ to) payload
+  Just $ MkDAG nodes dag_edges
+
+-- Todo: Dijkstra's algorithm
+
+
+instance Subset DirectedAcyclicGraph DirectedGraph
+  inject = -- pad with zeros
+  project = -- topo sort
+  unsafe_project =
+
+
 '### 1.Generating adjacency matrices.
-These first two functions start with an adjaceny matrix that has `False`,
+These first two functions start with an adjacency matrix that has `False`,
 for every entry, and write a `True` for every edge in the list or lists.
 
 def edgeListToMatrix {n} [Ix n] (AsList _ edges: List (n & n)) : n=>n=>Bool =
@@ -19,6 +98,38 @@ def edgeListToMatrix {n} [Ix n] (AsList _ edges: List (n & n)) : n=>n=>Bool =
     for i.
       (from, to) = edges.i
       adjmat!from!to += True
+
+
+-- Todo: Enforce uniqueness before using OrMonoid
+
+instance {a} Monoid (Maybe a)
+  mempty = Nothing
+  mcombine = \x y. case x of
+    Nothing -> y
+    Just x' -> case y of
+      Nothing -> Just x'
+      Just y' -> error "Race occured in Maybe monoid."
+
+def yield_accum_implicit 
+      {a b w eff}
+      [Monoid b] [mlift:MonoidLifter b w]
+      (action: ((h:Type) ?-> AccumMonoid h b ?=> Ref h w -> {Accum h|eff} a))
+      : {|eff} w =
+  --named-instance MyMo : Monoid b
+  --  mempty = mempty
+  --  mcombine = mcombine
+  snd $ run_accum _ action
+
+def edgeListToMatrix' {node node_payload edge_payload}
+    [Ix node] (edgelist:(DirectedEdgeList node node_payload edge_payload)) :
+      DirectedAdjacencyMatrix node node_payload edge_payload =
+
+
+  MkEdgeList (AsList _ edges) = edgelist
+  MkDirectedAdjacencyMatrix $ yield_accum OrMonoid \adjmat.
+    for i.
+      (MkDirectedEdge from to payload) = edges.i
+      adjmat!from!to += Just payload
 
 def childListsToMatrix {n} (lists:n=>List n) : n=>n=>Bool =
   for i.
@@ -138,26 +249,3 @@ edgelist = (AsList 6 [ ((0@Fin 4), (2@Fin 4))
                   matrixToChildLists test_edges)
 
 :p edgelist == matrixToEdgeList test_edges
-
-
-
-
-------------- Scratch ----------------
-
---data DAGEdge n:Int =  -- Causes compiler bug.
---  MkEdge left:(Fin n) right:(..left)
-
--- data DirectedAcyclicGraph a:Type =
---   MkGraph n:Type nodes:(n=>a) m:Type edges:(m=>((a:n) ** (b:(..a)))
-
-data Graph a:Type =
-  MkGraph n:Type nodes:(n=>a) m:Type edges:(m=>(n & n))
-
-data EdgeList n:Type =
-  MkEdgeList list:(List (n & n))
-
-data AdjacencyMatrix n:Type =
-  MkAdjacencyMatrix matrix:(n=>n=>Bool)
-
-data AdjacencyLists n:Type =
-  MkChildLists children:(n=>List n)
