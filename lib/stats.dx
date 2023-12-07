@@ -77,6 +77,12 @@ def ls_sum(x:n=>LogSpace f) -> LogSpace f
   lx = map ln x
   Exp $ log_sum_exp lx
 
+def ls_normalize(x:n=>LogSpace f) -> n=>LogSpace f
+    given (n|Ix, f|Fractional|Sub|Floating|Mul|Ord) =
+  z = ls_sum x
+  map (\x. divide(x, z)) x
+
+
 '## Probability distributions
 Simulation and evaluation of [probability distributions](https://en.wikipedia.org/wiki/Probability_distribution). Probability distributions which can be sampled should implement `Random`, and those which can be evaluated should implement the `Dist` interface. Distributions over an ordered space (such as typical *univariate* distributions) should also implement `OrderedDist`.
 
@@ -96,7 +102,7 @@ Some commonly encountered univariate distributions.
 ### Bernoulli distribution
 The [Bernoulli distribution](https://en.wikipedia.org/wiki/Bernoulli_distribution) is parameterised by its "success" probability, `prob`.
 
-struct Bernoulli =
+struct Bernoulli =  -- TODO: Replace with Categorical Bool?
   prob: Float
 
 instance Random(Bernoulli ,Bool)
@@ -121,6 +127,53 @@ instance OrderedDist(Bernoulli, Bool, Float)
   def quantile(bern, q) =
     q > (1 - bern.prob)
 
+data Categorical(n|Ix) =
+  UnSafeMkCat(normalized_probs:n=>LogSpace Float, cdf:n=>Float)
+  -- logprobs: n=>Float  -- normalized
+
+def make_categorical(normalized_logprobs:n=>Float) given (n|Ix) =
+  normalized_logprobs = ls_normalize(map (\x. Exp $ x) normalized_logprobs)
+  cdf = cdf_for_categorical(map (\x. ln x) normalized_logprobs)
+  UnSafeMkCat(normalized_logprobs, cdf)
+
+-- cdf should include 0.0 but not 1.0
+-- def categorical_from_cdf(cdf: n=>Float, key: Key) -> n given (n|Ix) =
+--   r = rand key
+--   from_just $ left_fence $ search_sorted(cdf, r)
+
+-- def normalize_pdf(xs: d=>Float) -> d=>Float given (d|Ix) = xs / sum xs
+
+-- def normalize_logpdf(xs: d=>Float) -> d=>Float given (d|Ix) = xs / sum xs
+
+-- def cdf_for_categorical(logprobs: n=>Float) -> n=>Float given (n|Ix) =
+--   maxLogProb = maximum logprobs
+--   cumsum_low $ normalize_pdf $ for i. exp(logprobs[i] - maxLogProb)
+
+-- def categorical(logprobs: n=>Float, key: Key) -> n given (n|Ix) =
+--   categorical_from_cdf(cdf_for_categorical logprobs, key)
+
+instance Random(Categorical n, n) given (n|Ix)
+  def draw(cat, k) =
+    UnSafeMkCat(normalized_probs, _) = cat
+    normalized_logprobs = (map \x. ln x) normalized_probs
+    categorical(normalized_logprobs, k)
+
+catrv = make_categorical([1.0, 99.0, 0.0, 0.5])
+
+ans:(Fin 4) = draw catrv (new_key 0)
+
+ans
+
+instance Dist(Categorical n, n, Float) given (n|Ix)
+  def density(cat, i) =
+    UnSafeMkCat(normalized_probs, _) = cat
+    normalized_probs[i]
+
+
+
+struct DiscreteMarkov(n, t) given (n|Ix, t|Ix) =
+  init: Categorical n
+  transition: t->n->Categorical n
 
 '### Binomial distribution
 The [binomial distribution](https://en.wikipedia.org/wiki/Binomial_distribution) is parameterised by the number of trials, `trials`, and the success probability, `prob`. Mean is `trials*prob`.
