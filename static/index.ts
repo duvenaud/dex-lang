@@ -18,9 +18,9 @@ type HTMLString = string
 type Div = Element
 type Status = "Waiting" | "Running" | "Complete" | "CompleteWithErrors" | "Inert"
 
-type HighlightType = "HighlightGroup" |  "HighlightLeaf" | "HighlightError" | "HighlightScope"
-                   | "HighlightBinder" | "HighlightOcc"
-type Highlight    = [SrcId, HighlightType]
+type DexHighlightType = "HighlightGroup" | "HighlightLeaf" | "HighlightError" | "HighlightScope"
+                     | "HighlightBinder" | "HighlightOcc"
+type DexHighlight = [SrcId, DexHighlightType]
 
 type HsMaybe<T> = T | null
 type HsOverwrite<T> = {tag:"OverwriteWith"; contents:T} | {tag: "NoChange"}
@@ -30,7 +30,7 @@ type TreeMap  = Map<SrcId, TreeNode>
 type TreeNode = {
     srcId      : SrcId
     span       : [Div, Div] | null ;
-    highlights : Highlight[];
+    highlights : DexHighlight[];
     text       : HTMLString}
 type Cell = {
     cellId       : CellId;
@@ -62,10 +62,10 @@ type HsRenderedOutput =
 type HsFocusMap = Map<LexemeId, SrcId>
 type HsTreeNodeState = {
     tnSpan        : [LexemeId, LexemeId]
-    tnHighlights  : Highlight[]
+    tnHighlights  : DexHighlight[]
     tnText        : HTMLString}
 type HsTreeNodeUpdate = {
-    tnuHighlights : Highlight[];
+    tnuHighlights : DexHighlight[];
     tnuText       : HTMLString[]}
 type HsTreeNodeMapUpdate =
     {tag: "Create" ; contents: HsTreeNodeState}  |
@@ -304,7 +304,7 @@ function applyCellHover(cell:Cell, srcId:LexemeId) {
 }
 function applyFocus(cell:Cell, focus:SrcId) {
     const focusNode : TreeNode = cell.treeMap.get(focus) ?? oops()
-    focusNode.highlights.forEach((h:Highlight) => {
+    focusNode.highlights.forEach((h:DexHighlight) => {
         const [sid, ty] = h
         const node : TreeNode = cell.treeMap.get(sid) ?? oops()
         highlightTreeNode(true, node, ty)})
@@ -314,7 +314,7 @@ function setHoverInfo(s:string) {
     hoverInfoDiv.innerHTML = ""
     appendText(hoverInfoDiv, s)
 }
-function computeHighlightClass(h:HighlightType) : string {
+function computeHighlightClass(h:DexHighlightType) : string {
     switch (h) {
         case "HighlightGroup":
             return "highlight-group"
@@ -330,7 +330,7 @@ function computeHighlightClass(h:HighlightType) : string {
             return "highlight-occ";
     }
 }
-function highlightTreeNode(isTemporary: boolean, node: TreeNode, highlightType:HighlightType) {
+function highlightTreeNode(isTemporary: boolean, node: TreeNode, highlightType:DexHighlightType) {
     const highlightClass : string = computeHighlightClass(highlightType)
     if (node.span !== null) {
         let [l, r] = node.span
