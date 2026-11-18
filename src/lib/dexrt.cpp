@@ -92,7 +92,7 @@ double randunif(uint64_t keypair) {
 
 void showHex(char **resultPtr, char x) {
   auto p = reinterpret_cast<char*>(malloc_dex(100));  // TODO: something better!
-  auto n = sprintf(p, "%02hhX", x);
+  auto n = snprintf(p, 100, "%02hhX", x);
   auto result1Ptr = reinterpret_cast<int32_t*>(resultPtr[0]);
   auto result2Ptr = reinterpret_cast<char**>(  resultPtr[1]);
   *result1Ptr = n;
@@ -101,7 +101,7 @@ void showHex(char **resultPtr, char x) {
 
 void showFloat(char **resultPtr, float x) {
   auto p = reinterpret_cast<char*>(malloc_dex(100));  // TODO: something better!
-  auto n = sprintf(p, "%.4f", x);
+  auto n = snprintf(p, 100, "%.4f", x);
   auto result1Ptr = reinterpret_cast<int32_t*>(resultPtr[0]);
   auto result2Ptr = reinterpret_cast<char**>(  resultPtr[1]);
   *result1Ptr = n;
@@ -110,7 +110,7 @@ void showFloat(char **resultPtr, float x) {
 
 void showInt(char **resultPtr, int32_t x) {
   auto p = reinterpret_cast<char*>(malloc_dex(100));  // TODO: something better!
-  auto n = sprintf(p, "%d", x);
+  auto n = snprintf(p, 100, "%d", x);
   auto result1Ptr = reinterpret_cast<int32_t*>(resultPtr[0]);
   auto result2Ptr = reinterpret_cast<char**>(  resultPtr[1]);
   *result1Ptr = n;
