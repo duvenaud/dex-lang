@@ -19,11 +19,14 @@ up to a specified input tolerance.
 'The rest of the algorithms in this file simply translate and
 scale calls to this function.
 
-struct SamplerState(v) =
+struct SamplerState(v:Type) =
   k      : Key
   y      : v
   sigma  : Float
   t      : Float
+
+def myfold(init:c, body:(n, c)-> c) -> c  given (n|Ix, c|Data) =
+  snd $ scan(init, for i:n. ()) \i x carry. ((), body(i, carry))
 
 def sample_unit_brownian_bridge(
     tolerance:Float,
@@ -34,12 +37,12 @@ def sample_unit_brownian_bridge(
   # Can only handle t between 0 and 1.
   # iteratively subdivide to desired tolerance.
   num_iters = 10 + f_to_n (-log tolerance)
-  init_state = SamplerState(key, zero, 1.0, t)
-  result = fold init_state \i:(Fin num_iters) prev.
-      [key_draw, key_left, key_right] = split_key key
+  init_state = SamplerState(key, zero::v, 1.0, t)
+  result = myfold init_state \i:(Fin num_iters) prev:(SamplerState v).
+      [key_draw, key_left, key_right] = (split_key key)::(Fin 3)=>Word64
       # add scaled noise
       t' = abs (prev.t - 0.5)
-      new_y = prev.y + prev.sigma * (0.5 - t') .* sampler key_draw
+      new_y = prev.y + prev.sigma * (0.5 - t') .* (sampler key_draw)::v
 
       # zoom in left or right
       new_key = if prev.t > 0.5
@@ -74,7 +77,7 @@ def sample_brownian_bridge(
     ) -> v given (v|VSpace) =
   # Linearly interpolate between the two bracketing samples
   # and add appropriately scaled Brownian bridge noise.
-  unit_bb = \t. sample_unit_brownian_bridge (tolerance / (t1 - t0)) sampler key t
+  unit_bb = \t:Float. sample_unit_brownian_bridge (tolerance / (t1 - t0)) sampler key t
   bridge_val = scale_brownian_bridge unit_bb t0 t1 t
   interp_val = linear_interp t0 y0 t1 y1 t
   bridge_val + interp_val
@@ -87,22 +90,22 @@ def sample_brownian_motion(
     ) -> v   given (v|VSpace) =
   # Can handle a t' anywhere on the real line.
   # Handle negative times by reflecting and using a different key.
-  [neg_key', key'] = split_key key
+  [neg_key', key'] = (split_key key)::(Fin 2)=>Word64
   (key, t) = if t' < 0.0
     then (neg_key', -t')
     else (key',      t')
 
-  [key_start, key_rest] = split_key key
+  [key_start, key_rest] = (split_key key)::(Fin 2)=>Word64
   first_f = sampler key_start
 
   # Iteratively sample a point twice as far ahead
   # until we bracket the query time.
-  doublings = Fin (1 + (natlog2 (f_to_n t)))
-  init_state = (0.0, zero, 1.0, first_f, key_rest)
+  doublings = 1 + natlog2 (f_to_n t)
+  init_state = (0.0, zero::v, 1.0, first_f, key_rest)
   (t0, left_f, t1, right_f, key_draw) =
-    fold init_state \i:doublings state.
+    myfold init_state \i:(Fin doublings) state:(Float, v, Float, v, Word64).
       (t0, left_f, t1, right_f, key_inner) = state
-      [key_current, key_continue] = split_key key_rest
+      [key_current, key_continue] = (split_key key_rest)::(Fin 2)=>Word64
       new_right_f = left_f + (sqrt t1) .* sampler key_current
       (t1, right_f, t1 * 2.0, new_right_f, key_continue)
   # The above iterative loop could be mostly parallelized, but would
@@ -124,7 +127,7 @@ fs = each xs \x. sample_brownian_motion tolerance randn (new_key 0) x
 
 '#### Check that the finite differences look like white noise
 
-fdiffs = for i.
+fdiffs = for i:pixels.
   (fs[((ordinal i) -| 1)@_] - fs[i]) / sqrt tolerance
 :html show_plot $ xy_plot xs fdiffs
 > <html output>
@@ -138,7 +141,7 @@ interface HasStandardNormal(a:Type)
 
 instance HasStandardNormal(Float32)
   def rand_normal(k) = randn k
-instance HasStandardNormal(n=>a) given (a|HasStandardNormal, n|Ix)
+instance HasStandardNormal(n=>a) given (a:Type|HasStandardNormal, n|Ix)
   def rand_normal(k) = for i. rand_normal (ixkey k i)
 
 
@@ -156,17 +159,22 @@ interface HasBrownianSheet(a:Type, v|HasStandardNormal)
   sample_brownian_sheet : (Float, Key, a) -> v
 
 instance HasBrownianSheet(Float, v) given (v|HasStandardNormal|VSpace)
+  # 1D Brownian Sheet
   def sample_brownian_sheet(tol, k, x) =
     sample_brownian_motion tol rand_normal k x
 
-instance HasBrownianSheet((a, Float), v) given (a, v|VSpace) (HasBrownianSheet a v)
+instance HasBrownianSheet((a, Float), v) given (a:Type, v:Type|VSpace) (HasBrownianSheet a v)
   def sample_brownian_sheet(tol, k, xab) =
     # the call to `sample_brownian_sheet` below will recurse
     # until the input is one-dimensional.
     (xa, xb) = xab
-    sample_a = \k. sample_brownian_sheet tol k xa
+    sample_a = \k:Word64. sample_brownian_sheet tol k xa
     sample_brownian_motion tol sample_a k xb
 
+def sample_2d_brownian_sheet(tol:Float, k:Word64, xab:(Float, Float))->v given (v|VSpace|HasStandardNormal) =
+  (xa, xb) = xab
+  sample_a = \k:Word64. sample_brownian_motion tol rand_normal k xa
+  sample_brownian_motion tol sample_a k xb
 
 '## Demo: Two-dimensional Brownian sheet
 Next, we plot a single sample from a two-dimensional Brownian
