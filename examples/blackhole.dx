@@ -1,0 +1,396 @@
+'# Black Hole Raytracer
+
+'This renders a spinning black hole and its accretion disk by following light
+through curved spacetime. The only place general relativity enters is one
+scalar function, the Hamiltonian of the metric. Automatic differentiation turns
+that function into the equations of motion, and an adaptive ODE solver follows
+each ray until it falls in, hits the disk, or escapes to the sky.
+
+'Every pixel takes a different number of solver steps, which is awkward to
+vectorize by hand but is just a loop here.
+
+import png
+import plot
+
+def Vec(n:Nat) -> Type = Fin n => Float
+
+def length(x: d=>Float) -> Float given (d|Ix) = sqrt $ sum for i:d. sq x[i]
+def normalize(x: d=>Float) -> d=>Float given (d|Ix) = x / (length x)
+def cross(a:Vec 3, b:Vec 3) -> Vec 3 =
+  [a1, a2, a3] = a
+  [b1, b2, b3] = b
+  [a2 * b3 - a3 * b2, a3 * b1 - a1 * b3, a1 * b2 - a2 * b1]
+
+'## Geodesics from a Hamiltonian
+
+'A photon is a point in spacetime together with a momentum covector. It moves
+along a geodesic, and geodesics are the trajectories of the Hamiltonian
+$H(x, p) = \frac{1}{2} g^{\mu\nu}(x) p_\mu p_\nu$. So a spacetime is specified
+by a single function, and Hamilton's equations
+$\dot x = \partial H / \partial p$, $\dot p = - \partial H / \partial x$
+come from one call to `grad`. There are no Christoffel symbols to derive.
+
+Event    = Vec 4   # a point in spacetime:  (t, x, y, z)
+Covector = Vec 4   # a photon's momentum:   (p_t, p_x, p_y, p_z)
+Phase       : Type = (Event, Covector)
+Hamiltonian : Type = (Event, Covector) -> Float
+
+def geodesic_flow(h:Hamiltonian, s:Phase) -> Phase =
+  (dH_dx, dH_dp) = grad(\s':Phase. h(fst s', snd s'), s)
+  (dH_dp, neg dH_dx)
+
+'The Hamiltonian is also all we need to take inner products of covectors,
+by polarization: $g^{\mu\nu} p_\mu q_\nu = H(p + q) - H(p) - H(q)$.
+
+def metric_dot(h:Hamiltonian, x:Event, p:Covector, q:Covector) -> Float =
+  h(x, p + q) - h(x, p) - h(x, q)
+
+'## Two spacetimes
+
+'Flat spacetime, for comparison:
+
+def minkowski(_:Event, p:Covector) -> Float =
+  [pt, px, py, pz] = p
+  0.5 * (sq px + sq py + sq pz - sq pt)
+
+'A black hole of mass 1 and spin `a` about the z axis. In
+[Kerr-Schild coordinates](https://en.wikipedia.org/wiki/Kerr_metric#Kerr%E2%80%93Schild_coordinates)
+the inverse metric is the flat one minus a rank-one correction,
+$g^{\mu\nu} = \eta^{\mu\nu} - f k^\mu k^\nu$, and nothing special happens to
+the coordinates at the horizon, so rays can cross it without trouble.
+
+def ks_radius(a:Float, x:Event) -> Float =
+  [_, x1, x2, x3] = x
+  rho2 = sq x1 + sq x2 + sq x3 - sq a
+  sqrt $ 0.5 * (rho2 + sqrt (sq rho2 + 4.0 * sq a * sq x3))
+
+def kerr(a:Float, x:Event, p:Covector) -> Float =
+  [_, x1, x2, x3] = x
+  [pt, px, py, pz] = p
+  r  = ks_radius a x
+  r2 = sq r
+  f  = 2.0 * r2 * r / (sq r2 + sq a * sq x3)
+  kx = (r * x1 + a * x2) / (r2 + sq a)
+  ky = (r * x2 - a * x1) / (r2 + sq a)
+  kz = x3 / r
+  kp = kx * px + ky * py + kz * pz - pt
+  minkowski(x, p) - 0.5 * f * sq kp
+
+'## Adaptive integration
+
+'One step of the Cash-Karp Runge-Kutta method. It returns a fifth-order
+estimate of the next state, and its difference from an embedded fourth-order
+estimate, which we use to choose the step size.
+
+def rk45_step(f:(v)->v, y:v, h:Float) -> (v, v) given (v|VSpace) =
+  k1 = f y
+  k2 = f $ y + h .* ((1.0 / 5.0) .* k1)
+  k3 = f $ y + h .* ((3.0 / 40.0) .* k1 + (9.0 / 40.0) .* k2)
+  k4 = f $ y + h .* ((3.0 / 10.0) .* k1 - (9.0 / 10.0) .* k2 + (6.0 / 5.0) .* k3)
+  k5 = f $ y + h .* ((-11.0 / 54.0) .* k1 + (5.0 / 2.0) .* k2 - (70.0 / 27.0) .* k3
+                     + (35.0 / 27.0) .* k4)
+  k6 = f $ y + h .* ((1631.0 / 55296.0) .* k1 + (175.0 / 512.0) .* k2
+                     + (575.0 / 13824.0) .* k3 + (44275.0 / 110592.0) .* k4
+                     + (253.0 / 4096.0) .* k5)
+  y5 = y + h .* ((37.0 / 378.0) .* k1 + (250.0 / 621.0) .* k3
+                 + (125.0 / 594.0) .* k4 + (512.0 / 1771.0) .* k6)
+  y4 = y + h .* ((2825.0 / 27648.0) .* k1 + (18575.0 / 48384.0) .* k3
+                 + (13525.0 / 55296.0) .* k4 + (277.0 / 14336.0) .* k5 + (1.0 / 4.0) .* k6)
+  (y5, y5 - y4)
+
+def error_ratio(tol:Float, s:Phase, err:Phase) -> Float =
+  def worst(y:Vec 4, e:Vec 4) -> Float =
+    maximum for i:(Fin 4). abs e[i] / (tol * (1.0 + abs y[i]))
+  max (worst (fst s) (fst err)) (worst (snd s) (snd err))
+
+'## Following a ray
+
+'The scene is a hole at the origin, a thin disk in the plane `z = 0`, and a
+sky far away. A ray ends when it meets one of them.
+
+struct Scene =
+  spin       : Float   # of the hole (sets the shape of the radial coordinate)
+  r_capture  : Float   # rays inside this radius never come back
+  disk_inner : Float
+  disk_outer : Float
+  r_escape   : Float   # rays beyond this radius reach the sky
+
+enum Fate =
+  Captured
+  HitDisk(Phase)
+  Escaped(Phase)
+  OutOfSteps
+
+def trace(h:Hamiltonian, scene:Scene, tol:Float, s0:Phase) -> Fate =
+  flow = \y:Phase. geodesic_flow(h, y)
+  with_state (s0, 1.0) \ref.
+    bounded_iter 4000 OutOfSteps \_.
+      (s, dt) = get ref
+      (s', err) = rk45_step(flow, s, dt)
+      e = error_ratio tol s' err
+      dt' = dt * clip (0.2, 4.0) (0.9 * pow e (-0.2))
+      if e > 1.0
+        then
+          # Too inaccurate. Try again with a smaller step.
+          ref := (s, dt')
+          Continue
+        else
+          r' = ks_radius scene.spin (fst s')
+          ref := (s', min dt' (0.25 * (1.0 + r')))
+          # Did this step cross the plane of the disk? If so, where?
+          z  = (fst s )[3@_]
+          z' = (fst s')[3@_]
+          crossing = s + (z / (z - z')) .* (s' - s)
+          r_cross = ks_radius scene.spin (fst crossing)
+          hit = z * z' < 0.0 && r_cross > scene.disk_inner && r_cross < scene.disk_outer
+          if hit
+            then Done (HitDisk crossing)
+            else
+              if r' < scene.r_capture
+                then Done Captured
+                else
+                  if r' > scene.r_escape
+                    then Done (Escaped s')
+                    else Continue
+
+'### Checking the physics
+
+'In flat spacetime light travels in straight lines, so the momentum of a ray
+never changes.
+
+no_disk = Scene(0.0, 2.02, 0.0, 0.0, 100.0)
+flat : Hamiltonian = \x p. minkowski(x, p)
+
+:p trace flat no_disk 1.0e-5 ([0.0, -50.0, 3.0, 0.0], [-1.0, 1.0, 0.0, 0.0])
+> (Escaped ([167.1618, 117.1618, 3., 0.], [-1., 1., 0., 0.]))
+
+'Around a non-spinning hole, light aimed to pass the centre at a distance
+less than $3\sqrt{3} \approx 5.196$ is captured, and anything wider escapes.
+Here are eight rays with aiming distances from 5.0 to 5.35 (0 means captured,
+1 means escaped).
+
+def escapes(b:Float) -> Nat =
+  schwarzschild : Hamiltonian = \x p. kerr(0.0, x, p)
+  start : Phase = ([0.0, -90.0, b, 0.0], [-1.0, 1.0, 0.0, 0.0])
+  case trace schwarzschild no_disk 1.0e-5 start of
+    Escaped _  -> 1
+    HitDisk _  -> 0
+    Captured   -> 0
+    OutOfSteps -> 0
+
+:p for i:(Fin 8). escapes (5.0 + 0.05 * n_to_f (ordinal i))
+> [0, 0, 0, 0, 1, 1, 1, 1]
+
+'## Camera
+
+'The camera needs four orthonormal covectors at its position: one along its
+worldline and three for the directions it can look in. We get them by
+Gram-Schmidt, using the metric of whichever spacetime we are in. A pixel's ray
+then starts with momentum "time plus a unit direction", which is null by
+construction.
+
+def reject(h:Hamiltonian, x:Event, v:Covector, e:Covector) -> Covector =
+  v - (metric_dot h x v e / metric_dot h x e e) .* e
+
+def unit(h:Hamiltonian, x:Event, v:Covector) -> Covector =
+  v / sqrt (abs (metric_dot h x v v))
+
+struct Camera =
+  distance    : Float   # from the hole, in units of its mass
+  inclination : Float   # angle from the spin axis, in radians
+  half_width  : Float   # tangent of half the horizontal field of view
+
+struct Frame =
+  origin : Event
+  time   : Covector
+  fwd    : Covector
+  right  : Covector
+  up     : Covector
+
+def camera_frame(h:Hamiltonian, cam:Camera) -> Frame =
+  pos : Vec 3 = cam.distance .* [sin cam.inclination, 0.0, cos cam.inclination]
+  f3 = normalize (neg pos)
+  r3 = normalize (cross f3 [0.0, 0.0, 1.0])
+  u3 = cross r3 f3
+  x : Event = [0.0, pos[0@_], pos[1@_], pos[2@_]]
+  def lift(v:Vec 3) -> Covector = [0.0, v[0@_], v[1@_], v[2@_]]
+  e_t = unit h x [-1.0, 0.0, 0.0, 0.0]
+  e_f = unit h x $ reject h x (lift f3) e_t
+  e_r = unit h x $ reject h x (reject h x (lift r3) e_t) e_f
+  e_u = unit h x $ reject h x (reject h x (reject h x (lift u3) e_t) e_f) e_r
+  Frame(x, e_t, e_f, e_r, e_u)
+
+def camera_ray(frame:Frame, u:Float, v:Float) -> Phase =
+  n = (frame.fwd + u .* frame.right + v .* frame.up) / sqrt (1.0 + sq u + sq v)
+  (frame.origin, frame.time + n)
+
+'## Texture
+
+def lattice(i:Float, j:Float) -> Float =
+  rand $ hash (new_key (f_to_n (i + 1000.0))) (f_to_n (j + 1000.0))
+
+'Smooth random texture, for streaks in the disk and dust in the sky. It
+repeats with the given period in `v`, so that it can wrap around a circle.
+
+def smooth_noise(u:Float, v:Float, period:Float) -> Float =
+  v' = v - period * floor (v / period)
+  i  = floor u
+  j  = floor v'
+  j' = select ((j + 1.0) < period) (j + 1.0) 0.0
+  def ease(t:Float) -> Float = t * t * (3.0 - 2.0 * t)
+  a = ease (u - i)
+  b = ease (v' - j)
+  (1.0 - a) * ((1.0 - b) * lattice i j         + b * lattice i j') +
+         a  * ((1.0 - b) * lattice (i + 1.0) j + b * lattice (i + 1.0) j')
+
+'## The accretion disk
+
+'Gas in the disk moves on circular orbits. The innermost stable one sets the
+disk's inner edge, and it is much closer in for gas that orbits the same way
+the hole spins.
+
+def isco(a:Float) -> Float =
+  def cbrt(x:Float) -> Float = pow x (1.0 / 3.0)
+  z1 = 1.0 + cbrt (1.0 - sq a) * (cbrt (1.0 + a) + cbrt (1.0 - a))
+  z2 = sqrt (3.0 * sq a + sq z1)
+  3.0 + z2 - sqrt ((3.0 - z1) * (3.0 + z1 + 2.0 * z2))
+
+'The angular velocity of a circular orbit, and the time-dilation factor
+$u^t$ of gas moving on it. `sense` is 1 for counterclockwise orbits and -1 for
+clockwise.
+
+def orbit_omega(a:Float, r:Float, sense:Float) -> Float = 1.0 / (a + sense * pow r 1.5)
+
+def orbit_ut(a:Float, r:Float, om:Float) -> Float =
+  1.0 / sqrt ((1.0 - 2.0 / r) + (4.0 * a / r) * om - (sq r + sq a + 2.0 * sq a / r) * sq om)
+
+'The disk glows like a black body, hotter towards the middle. What the camera
+sees is a black body whose temperature is scaled by the ratio `g` of received
+to emitted photon energy. That one number carries both the Doppler shift from
+the gas's motion and the gravitational redshift from climbing away from the
+hole.
+
+def blackbody(temp:Float) -> Color =
+  # hc / (lambda k) for red, green and blue light. Scaled so 6500 K is white.
+  c2 = [22135.0, 26160.0, 32700.0]
+  for i. (exp (c2[i] / 6500.0) - 1.0) / (exp (c2[i] / temp) - 1.0)
+
+def disk_profile(r_in:Float, r:Float) -> Float =
+  pow ((1.0 - sqrt (r_in / r)) / (r * r * r)) 0.25
+
+
+def turns(angle:Float) -> Float = angle / (2.0 * pi)
+
+def disk_color(scene:Scene, sense:Float, peak_temp:Float, s:Phase) -> Color =
+  [_, x, y, _] = fst s
+  [pt, px, py, _] = snd s
+  r  = ks_radius scene.spin (fst s)
+  om = orbit_omega scene.spin r sense
+  ut = orbit_ut scene.spin r om
+  g  = 1.0 / (ut * (neg pt - om * (x * py - y * px)))
+  r_in = scene.disk_inner
+  temp = peak_temp * disk_profile r_in r / disk_profile r_in ((49.0 / 36.0) * r_in)
+  # Streaks, wound into a spiral by the faster rotation of the inner disk.
+  winding = turns (atan2 y x) + 0.6 * sense * log r
+  streaks = (smooth_noise (1.3 * r) (12.0 * winding) 12.0
+             + 0.5 * smooth_noise (4.0 * r) (40.0 * winding) 40.0)
+  (0.65 + 0.45 * streaks) .* blackbody (g * temp)
+
+'## The sky
+
+'Stars scattered at random, and a faint band of glowing dust.
+
+def sky(dir:Vec 3) -> Color =
+  [dx, dy, dz] = normalize dir
+  lat = atan2 dz (sqrt (sq dx + sq dy))
+  lon = atan2 dy dx
+  cells = 200.0
+  u = (lat / pi + 0.5) * cells
+  v = (lon / (2.0 * pi) + 0.5) * 2.0 * cells
+  ci = floor u
+  cj = floor v
+  [k1, k2, k3, k4, k5] = split_key(n=5, hash (new_key (f_to_n ci)) (f_to_n cj))
+  du = u - ci - (0.2 + 0.6 * rand k2)
+  dv = (v - cj - (0.2 + 0.6 * rand k3)) * cos lat
+  glow = exp (neg (sq du + sq dv) / (2.0 * sq 0.04))
+  star = select (rand k1 < 0.3) (glow * pow (rand k4) 3.0) 0.0
+  warm = rand k5
+  tint = [0.7 + 0.3 * warm, 0.8, 1.0 - 0.3 * warm]
+  # The band lies along a great circle, tilted against the disk.
+  across = dz * cos 1.0 + dy * sin 1.0
+  along  = turns (atan2 (dz * sin 1.0 - dy * cos 1.0) (neg dx))
+  dust = (smooth_noise (25.0 * across) (150.0 * along) 150.0
+          * smooth_noise (70.0 * across) (420.0 * along) 420.0)
+  band = 0.12 * dust * exp (neg (sq (across / 0.12)))
+  (8.0 * star) .* tint + band .* [0.75, 0.8, 1.0]
+
+'## Rendering
+
+def spatial(v:Vec 4) -> Vec 3 = [v[1@_], v[2@_], v[3@_]]
+
+def tone_map(c:Color) -> Color =
+  # Compress brightness but keep hue, then gamma-encode for the screen.
+  peak = maximum c + 1.0e-9
+  for i. pow (c[i] * (1.0 - exp (neg peak)) / peak) (1.0 / 2.2)
+
+struct Picture =
+  height  : Nat
+  width   : Nat
+  samples : Nat   # per pixel, along each axis
+
+def render(
+    pic:Picture, h:Hamiltonian, scene:Scene, sense:Float, cam:Camera
+    ) -> Fin pic.height => Fin pic.width => Color =
+  frame = camera_frame h cam
+  n  = pic.samples
+  hw = cam.half_width
+  hh = hw * n_to_f pic.height / n_to_f pic.width
+  for i:(Fin pic.height) j:(Fin pic.width).
+    tone_map $ mean for a:(Fin n). mean for b:(Fin n).
+      col = n_to_f (ordinal j) + (n_to_f (ordinal b) + 0.5) / n_to_f n
+      row = n_to_f (ordinal i) + (n_to_f (ordinal a) + 0.5) / n_to_f n
+      u = hw * (2.0 * col / n_to_f pic.width - 1.0)
+      v = hh * (1.0 - 2.0 * row / n_to_f pic.height)
+      radiance : Color = case trace h scene 1.0e-4 (camera_ray frame u v) of
+        Captured   -> zero
+        OutOfSteps -> zero
+        HitDisk s  -> 16.0 .* disk_color scene sense 6500.0 s
+        Escaped s  -> sky (spatial (fst (geodesic_flow(h, s))))
+      radiance
+
+'We follow each ray from the camera out into the scene, which is backwards
+in time compared to the light that actually arrives. Running time backwards
+turns a hole spinning one way into a hole spinning the other way, so to
+picture a hole with spin `a` whose disk orbits counterclockwise, we integrate
+around a hole with spin `-a` whose disk orbits clockwise.
+
+def black_hole_scene(spin:Float, cam:Camera) -> Scene =
+  r_horizon = 1.0 + sqrt (1.0 - sq spin)
+  Scene(neg spin, 1.02 * r_horizon, isco spin, 20.0, cam.distance + 5.0)
+
+spin = 0.9
+camera = Camera(60.0, 1.48, 0.42)
+scene = black_hole_scene spin camera
+hole : Hamiltonian = \x p. kerr(scene.spin, x, p)
+
+picture = if dex_test_mode()
+  then Picture(18, 32, 1)
+  else Picture(360, 640, 2)
+
+'First, what is actually there: the same disk and sky with gravity switched
+off, so that light travels in straight lines. The left side of the disk is
+brighter and bluer because it is moving towards us at about half the speed of
+light.
+
+no_hole = Scene(scene.spin, 0.0, scene.disk_inner, scene.disk_outer, scene.r_escape)
+
+:html imshow $ render picture flat no_hole (-1.0) camera
+> <html output>
+
+'And what we see. Light from the far side of the disk bends over the top of
+the hole, and light from its underside bends around the bottom. The thin
+bright ring hugging the shadow is light that circled the hole before leaving.
+The stars are smeared into arcs around it.
+
+:html imshow $ render picture hole scene (-1.0) camera
+> <html output>

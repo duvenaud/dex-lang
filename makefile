@@ -213,7 +213,7 @@ dexrt-llvm: src/lib/dexrt.bc
 example-names := \
   mandelbrot pi sierpinski rejection-sampler \
   regression brownian_motion particle-swarm-optimizer \
-  ode-integrator mcmc ctc raytrace particle-filter \
+  ode-integrator mcmc ctc raytrace blackhole particle-filter \
   fluidsim \
   sgd nn \
   quaternions manifold-gradients schrodinger tutorial \
