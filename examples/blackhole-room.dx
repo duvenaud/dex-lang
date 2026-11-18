@@ -14,72 +14,31 @@ import png
 import plot
 import ode
 
-'## Helper functions
+'## Vectors
 
 def Vec(n:Nat) -> Type = Fin n => Float
 
-def relu(x:Float) -> Float = max x 0.0
+Position  = Vec 3
+Direction = Vec 3  # a unit vector
+Angle     = Float  # in radians
+
+x_hat : Direction = [1., 0., 0.]
+y_hat : Direction = [0., 1., 0.]
+z_hat : Direction = [0., 0., 1.]
+
 def length(x: d=>Float) -> Float given (d|Ix) = sqrt $ sum for i:d. sq x[i]
 def normalize(x: d=>Float) -> d=>Float given (d|Ix) = x / (length x)
-def directionAndLength(x: d=>Float) -> (d=>Float, Float) given (d|Ix) =
-  l = length x
-  (x / (length x), l)
-
-def randuniform(lower:Float, upper:Float, k:Key) -> Float =
-  lower + (rand k) * (upper - lower)
-
-def sampleAveraged(sample:(Key) -> a, n:Nat, k:Key) -> a given (a|VSpace) =
-  yield_state zero \total.
-    for i:(Fin n).
-      total := get total + sample (ixkey k i) / n_to_f n
-
-def positiveProjection(x:n=>Float, y:n=>Float) -> Bool given (n|Ix) = dot x y > 0.0
 
 def cross(a:Vec 3, b:Vec 3) -> Vec 3 =
   [a1, a2, a3] = a
   [b1, b2, b3] = b
   [a2 * b3 - a3 * b2, a3 * b1 - a1 * b3, a1 * b2 - a2 * b1]
 
-# TODO: Use `data Color = Red | Green | Blue` and ADTs for index sets
-enum Image =
- MkImage(height:Nat, width:Nat, Fin height => Fin width => Color)
-
-xHat : Vec 3 = [1., 0., 0.]
-yHat : Vec 3 = [0., 1., 0.]
-zHat : Vec 3 = [0., 0., 1.]
-
-Angle = Float  # angle in radians
-
-def rotateX(p:Vec 3, angle:Angle) -> Vec 3 =
-  c = cos angle
-  s = sin angle
-  [px, py, pz] = p
-  [px, c*py - s*pz, s*py + c*pz]
-
-def rotateY(p:Vec 3, angle:Angle) -> Vec 3 =
+def rotate_y(p:Vec 3, angle:Angle) -> Vec 3 =
   c = cos angle
   s = sin angle
   [px, py, pz] = p
   [c*px + s*pz, py, - s*px+ c*pz]
-
-def rotateZ(p:Vec 3, angle:Angle) -> Vec 3 =
-  c = cos angle
-  s = sin angle
-  [px, py, pz] = p
-  [c*px - s*py, s*px+c*py, pz]
-
-def sampleCosineWeightedHemisphere(normal: Vec 3, k:Key) -> Vec 3 =
-  [k1, k2] = split_key(n=2, k)
-  u1 = rand k1
-  u2 = rand k2
-  uu = normalize $ cross normal [0.0, 1.1, 1.1]
-  vv = cross uu normal
-  ra = sqrt u2
-  rx = ra * cos (2.0 * pi * u1)
-  ry = ra * sin (2.0 * pi * u1)
-  rz = sqrt (1.0 - u2)
-  rr = (rx .* uu) + (ry .* vv) + (rz .* normal)
-  normalize rr
 
 '## Curved spacetime
 
@@ -133,9 +92,6 @@ def phase_error(tol:Float, err:Phase, s:Phase, s':Phase) -> Float =
 about its third axis. We shift and shrink it to sit wherever we like in the
 room, and turn it so that it spins about the vertical.
 
-Position  = Vec 3
-Direction = Vec 3  # Should be normalized.
-
 struct Hole =
   center : Position
   mass   : Float
@@ -186,45 +142,48 @@ def launch(h:Hamiltonian, pos:Position, dir:Direction) -> Phase =
 
 '## The room
 
+'The room is a table of objects, indexed by whatever is convenient. An object
+is either something solid, with a shape and a surface, or a lamp.
+
 Distance = Float
+Radiance = Color  # how much light, in each colour channel
+Filter   = Color  # what fraction of each colour channel survives
 
-BlockHalfWidths = Vec 3
-Radius = Float
-Radiance = Color
-
-enum ObjectGeom =
-  Wall(Direction, Distance)
-  Block(Position, BlockHalfWidths, Angle)
-  Sphere(Position, Radius)
+enum Shape =
+  Wall(Direction, Distance)      # the way it faces, and how far behind the origin it is
+  Block(Position, Vec 3, Angle)  # centre, half-widths, and rotation about the vertical
+  Sphere(Position, Distance)     # centre and radius
 
 enum Surface =
   Matte(Color)
   Mirror
 
-struct OrientedSurface =
-  normal  : Direction
-  surface : Surface
-
 enum Object =
-  PassiveObject(ObjectGeom, Surface)
-  # position, half-width, intensity (assumed to point down)
-  Light(Position, Float, Radiance)
+  Solid(Shape, Surface)
+  Lamp(Position, Distance, Radiance)  # a square facing down: centre, half-width, glow
 
-struct Ray =
-  origin : Position
-  dir    : Direction
+'Shapes are described by how far away they are from any point.
 
-Filter = Color
+def box_distance(half_widths:Vec 3, pos:Position) -> Distance =
+  length for i:(Fin 3). max (abs pos[i] - half_widths[i]) 0.0
 
-struct Params =
- numSamples : Nat
- maxBounces : Nat
- shareSeed  : Bool
- exposure   : Float
+def distance_to(obj:Object, pos:Position) -> Distance =
+  case obj of
+    Solid(shape, _) -> case shape of
+      Wall(facing, offset)              -> offset + dot facing pos
+      Block(center, half_widths, angle) -> box_distance half_widths $ rotate_y (pos - center) angle
+      Sphere(center, radius)            -> max (length (pos - center) - radius) 0.0
+    Lamp(center, half_width, _) -> box_distance [half_width, 0.01, half_width] (pos - center)
 
-# TODO: use a list instead, once they work
-struct Scene(n|Ix) =
-  objects : n=>Object
+def nearest(room:n=>Object, pos:Position) -> (Object, Distance) given (n|Ix) =
+  (i, d) = minimum_by(for i:n. (i, distance_to room[i] pos), snd)
+  (room[i], d)
+
+'The direction a surface faces is the direction in which the distance to it
+grows fastest.
+
+def facing(obj:Object, pos:Position) -> Direction =
+  grad(\p:Position. distance_to obj p) pos | normalize
 
 '## Marching along a geodesic
 
@@ -233,61 +192,44 @@ since a step that short cannot pass through anything. That is still true
 when the path is curved. So each solver step is limited both by the distance
 to the nearest surface and by the solver's own error estimate.
 
-def sdObject(pos:Position, obj:Object) -> Distance =
-  case obj of
-    PassiveObject(geom, _) -> case geom of
-      Wall(nor, d) -> d + dot nor pos
-      Block(blockPos, halfWidths, angle) ->
-        pos' = rotateY (pos - blockPos) angle
-        length $ for i:(Fin 3). max ((abs pos'[i]) - halfWidths[i]) 0.0
-      Sphere(spherePos, r) ->
-        pos' = pos - spherePos
-        max (length pos' - r) 0.0
-    Light(squarePos, hw, _) ->
-      pos' = pos - squarePos
-      halfWidths = [hw, 0.01, hw]
-      length $ for i:(Fin 3). max ((abs pos'[i]) - halfWidths[i]) 0.0
+struct Ray =
+  origin : Position
+  dir    : Direction
 
-def sdScene(scene:Scene n, pos:Position) -> (Object, Distance) given (n|Ix) =
-  (i, d) = minimum_by(for i:n. (i, sdObject pos scene.objects[i]), snd)
-  (scene.objects[i], d)
+enum Arrival =
+  AtSurface(Ray, Direction, Surface)  # the arriving ray, and the way the surface faces
+  AtLamp(Radiance)
+  Nowhere  # fell into the hole, left the room, or ran out of steps
 
-def calcNormal(obj:Object, pos:Position) -> Direction =
-  grad(\p:Position. sdObject(p, obj)) pos | normalize
-
-enum RayMarchResult =
-  # incident ray, surface normal, surface properties
-  HitObj(Ray, OrientedSurface)
-  HitLight(Radiance)
-  # Fell into the hole, left the room, or ran out of steps
-  HitNothing
-
-def raymarch(h:Hamiltonian, hole:Hole, scene:Scene n, ray:Ray) -> RayMarchResult given (n|Ix) =
-  maxIters : Nat = 300
+def march(h:Hamiltonian, hole:Hole, room:n=>Object, ray:Ray) -> Arrival given (n|Ix) =
+  max_steps : Nat = 300
   tol = 0.01
   flow = \y:Phase _:Time. geodesic_flow(h, y)
   # start a little way along the ray, to escape the surface we're leaving
   start = launch h (ray.origin + (10.0 * tol) .* ray.dir) ray.dir
+  # The solver's state: where we are, the flow there, and the step size to try.
   with_state (start, flow start 0.0, 1.0) \ref.
-    bounded_iter maxIters HitNothing \_.
+    bounded_iter max_steps Nowhere \_.
       (s, k, dt) = get ref
       pos = spatial (fst s)
       vel = spatial (fst k)
       speed = length vel
       dir = vel / speed
-      (obj, d) = sdScene scene pos
+      (obj, d) = nearest room pos
       gone = (length (pos - hole.center) < (capture_radius * hole.mass)) || (length pos > 30.0)
+      # Close to a surface, and not heading away from it. (Put this way round, a
+      # ray that has slipped just inside a surface, where it faces no particular
+      # way, also counts as having arrived.)
       arrived = case d < tol of
         False -> False
-        True  -> not $ positiveProjection dir (calcNormal obj pos)
+        True  -> not $ dot dir (facing obj pos) > 0.0
       if gone
-        then Done HitNothing
+        then Done Nowhere
         else
           if arrived
             then Done $ case obj of
-              PassiveObject(_, surf) ->
-                HitObj(Ray(pos, dir), OrientedSurface(calcNormal obj pos, surf))
-              Light(_, _, radiance) -> HitLight radiance
+              Solid(_, surface) -> AtSurface(Ray(pos, dir), facing obj pos, surface)
+              Lamp(_, _, glow)  -> AtLamp glow
             else
               dt_try = min dt (0.9 * (max d tol) / speed)
               (s', k', err, _) = runge_kutta_step flow s k 0.0 dt_try
@@ -298,9 +240,9 @@ def raymarch(h:Hamiltonian, hole:Hole, scene:Scene n, ray:Ray) -> RayMarchResult
                 else ref := (s', k', select (dt_try < dt) dt dt')
               Continue
 
-'## Aiming at the lamp
+'## Aiming at a lamp
 
-'A surface is lit by the lamp only along rays that actually arrive there, and
+'A surface is lit by a lamp only along rays that actually arrive there, and
 near the hole a ray aimed straight at the lamp bends away and misses. So we
 aim by trial and error: fire a ray through empty space, see by how much it
 misses, shift the aim by that much, and repeat.
@@ -339,146 +281,159 @@ def aim_at(h:Hamiltonian, hole:Hole, origin:Position, target:Position) -> Direct
 
 '## Light transport
 
-'This is the path tracer from the original example, with every straight ray
-replaced by a geodesic. Two approximations remain. The lamp can also be seen
-the long way around the hole, and that second image is only found by the
-random bounces. And the brightness of the lamp's light is worked out as if
-the hole did not focus or spread it.
+'A path starts at the camera and bounces around the room. At each surface it
+collects the light arriving there from the lamps, dimmed by the colours of
+the surfaces it has already bounced off on its way from the camera.
 
-def sampleReflection(surf:OrientedSurface, ray:Ray, k:Key) -> Ray =
-  nor = surf.normal
-  newDir = case surf.surface of
-    Matte _ -> sampleCosineWeightedHemisphere nor k
-    # TODO: surely there's some change-of-solid-angle correction we need to
-    # consider when reflecting off a curved surface.
-    Mirror  -> ray.dir - (2.0 * dot ray.dir nor) .* nor
-  Ray(ray.origin, newDir)
+'Two approximations remain. A lamp can also be seen the long way around the
+hole, and that second image is only found by the random bounces. And the
+brightness of a lamp's light is worked out as if the hole did not focus or
+spread it.
 
-def probReflection(surf:OrientedSurface, _:Ray, out_ray:Ray) -> Float =
-  case surf.surface of
-    Matte _ -> relu $ dot surf.normal out_ray.dir
-    Mirror  -> 0.0  # TODO: this should be a delta function of some sort
+def filtered(filter:Filter, light:Radiance) -> Radiance =
+  for i:(Fin 3). filter[i] * light[i]
 
-def applyFilter(filter:Filter, radiance:Radiance) -> Radiance =
-  for i. filter[i] * radiance[i]
+def tint(surface:Surface) -> Filter =
+  case surface of
+    Matte color -> color
+    Mirror      -> [1.0, 1.0, 1.0]
 
-def surfaceFilter(filter:Filter, surf:Surface) -> Filter =
-  case surf of
-    Matte color -> for i. filter[i] * color[i]
-    Mirror      -> filter
+def sample_cosine_weighted_hemisphere(normal:Direction, k:Key) -> Direction =
+  [k1, k2] = split_key(n=2, k)
+  u1 = rand k1
+  u2 = rand k2
+  uu = normalize $ cross normal [0.0, 1.1, 1.1]
+  vv = cross uu normal
+  ra = sqrt u2
+  rx = ra * cos (2.0 * pi * u1)
+  ry = ra * sin (2.0 * pi * u1)
+  rz = sqrt (1.0 - u2)
+  normalize $ (rx .* uu) + (ry .* vv) + (rz .* normal)
 
-def rayDirectRadiance(h:Hamiltonian, hole:Hole, scene:Scene n, ray:Ray) -> Radiance given (n|Ix) =
-  case raymarch h hole scene ray of
-    HitLight intensity -> intensity
-    HitNothing -> zero
-    HitObj(_, _) -> zero
+'Which way light leaves a surface that it arrived at along `arriving`.
 
-def sampleSquare(hw:Float, k:Key) -> Position =
- [kx, kz] : Fin 2 => Key = split_key k
- x = randuniform (- hw) hw kx
- z = randuniform (- hw) hw kz
- [x, 0.0, z]
+def bounce(surface:Surface, normal:Direction, arriving:Direction, k:Key) -> Direction =
+  case surface of
+    Matte _ -> sample_cosine_weighted_hemisphere normal k
+    Mirror  -> arriving - (2.0 * dot arriving normal) .* normal
 
-def sampleLightRadiance(
-    h:Hamiltonian,
-    hole:Hole,
-    scene:Scene n,
-    osurf:OrientedSurface,
-    inRay:Ray,
-    k:Key) -> Radiance given (n|Ix) =
+'How strongly a surface scatters light from the direction `towards` into a
+path. A mirror only passes light on along its one reflected direction, which
+`bounce` follows, so it scatters none of a lamp's light.
+
+def scattering(surface:Surface, normal:Direction, towards:Direction) -> Float =
+  case surface of
+    Matte _ -> max (dot normal towards) 0.0
+    Mirror  -> 0.0
+
+def rand_between(low:Float, high:Float, k:Key) -> Float =
+  low + (rand k) * (high - low)
+
+def lamp_light(
+    h:Hamiltonian, hole:Hole, room:n=>Object,
+    lamp:Object, pos:Position, normal:Direction, surface:Surface, k:Key
+    ) -> Radiance given (n|Ix) =
+  case lamp of
+    Solid(_, _) -> zero
+    Lamp(center, half_width, _) ->
+      [kx, kz] = split_key(n=2, k)
+      target = center + [rand_between (-half_width) half_width kx, 0.0,
+                         rand_between (-half_width) half_width kz]
+      towards = aim_at h hole pos target
+      if dot towards normal > 0.0   # is the lamp on this side of the surface?
+        then
+          solid_angle = ((max (dot towards y_hat) 0.0) * sq half_width
+                         / (pi * sq (length (target - pos))))
+          weight = solid_angle * scattering surface normal towards
+          # the lamp only counts if nothing is in the way
+          weight .* case march h hole room Ray(pos, towards) of
+            AtLamp glow        -> glow
+            AtSurface(_, _, _) -> zero
+            Nowhere            -> zero
+        else zero
+
+struct Params =
+  num_samples : Nat    # paths per pixel
+  max_bounces : Nat
+  share_seed  : Bool   # use the same random numbers for every pixel
+  exposure    : Float
+
+def trace_path(
+    params:Params, h:Hamiltonian, hole:Hole, room:n=>Object, from_camera:Ray, k:Key
+    ) -> Radiance given (n|Ix) =
+  unfiltered : Filter = [1.0, 1.0, 1.0]
   yield_accum (AddMonoid Float) \radiance.
-    each scene.objects \obj. case obj of
-      PassiveObject(_, _) -> ()
-      Light(lightPos, hw, _) ->
-        target = lightPos + sampleSquare hw k
-        distToLight = length (target - inRay.origin)
-        dirToLight = aim_at h hole inRay.origin target
-        if positiveProjection dirToLight osurf.normal then
-          # light on this far side of current surface
-          fracSolidAngle = (relu $ dot dirToLight yHat) * sq hw / (pi * sq distToLight)
-          outRay = Ray(inRay.origin, dirToLight)
-          coeff = fracSolidAngle * probReflection osurf inRay outRay
-          radiance += coeff .* rayDirectRadiance h hole scene outRay
-
-def tracePath(
-    params:Params, h:Hamiltonian, hole:Hole, scene:Scene n, initRay:Ray, k:Key
-    ) -> Color given (n|Ix) =
-  noFilter = [1.0, 1.0, 1.0]
-  yield_accum (AddMonoid Float) \radiance.
-    run_state  noFilter \filter.
-     run_state initRay  \ray.
-      bounded_iter params.maxBounces () \i.
-        case raymarch h hole scene $ get ray of
-          HitNothing -> Done ()
-          HitLight intensity ->
-            if i == 0 then radiance += intensity   # TODO: scale etc
+    with_state (from_camera, unfiltered) \path.
+      bounded_iter params.max_bounces () \i.
+        (ray, filter) = get path
+        case march h hole room ray of
+          Nowhere -> Done ()
+          AtLamp glow ->
+            if i == 0 then radiance += glow
             Done ()
-          HitObj(incidentRay, osurf) ->
+          AtSurface(arriving, normal, surface) ->
             [k1, k2] = split_key(n=2, hash k i)
-            lightRadiance = sampleLightRadiance h hole scene osurf incidentRay k1
-            ray    := sampleReflection osurf incidentRay k2
-            filter := surfaceFilter (get filter) osurf.surface
-            radiance += applyFilter (get filter) lightRadiance
+            filter' = filtered filter (tint surface)
+            here = arriving.origin
+            radiance += filtered filter' $ sum for j:n.
+              lamp_light h hole room room[j] here normal surface k1
+            path := (Ray(here, bounce surface normal arriving.dir k2), filter')
             Continue
 
 '## Camera
 
-# Assumes we're looking towards -z.
+'A pinhole camera looking along the negative z axis, with a square sensor.
+
 struct Camera =
-  numPix     : Nat
-  pos        : Position  # pinhole position
-  halfWidth  : Float     # sensor half-width
-  sensorDist : Float     # pinhole-sensor distance
+  num_pix     : Nat
+  pos         : Position  # of the pinhole
+  half_width  : Float     # of the sensor
+  sensor_dist : Float     # from the pinhole to the sensor
 
-def cameraRay(camera:Camera, i:Fin n, j:Fin n, key:Key) -> Ray given (n:Nat) =
-  # images indexed from top-left
-  halfWidth = camera.halfWidth
-  pixHalfWidth = halfWidth / n_to_f n
-  ys = reverse $ linspace (Fin n) (neg halfWidth) halfWidth
-  xs =           linspace (Fin n) (neg halfWidth) halfWidth
-  [kx, ky] = split_key(n=2, key)
-  x = xs[j] + randuniform (-pixHalfWidth) pixHalfWidth kx
-  y = ys[i] + randuniform (-pixHalfWidth) pixHalfWidth ky
-  Ray(camera.pos, normalize [x, y, neg camera.sensorDist])
+def take_picture(
+    params:Params, h:Hamiltonian, hole:Hole, room:m=>Object, camera:Camera
+    ) -> Fin camera.num_pix => Fin camera.num_pix => Color given (m|Ix) =
+  pixel = 2.0 * camera.half_width / n_to_f camera.num_pix
+  root_key = new_key 0
+  # images are indexed from the top left
+  for i:(Fin camera.num_pix) j:(Fin camera.num_pix).
+    pixel_key = if params.share_seed
+      then root_key
+      else ixkey (ixkey root_key i) j
+    params.exposure .* mean for sample:(Fin params.num_samples).
+      [k_ray, k_path] = split_key(n=2, ixkey pixel_key sample)
+      [kx, ky] = split_key(n=2, k_ray)
+      # a random point within this pixel of the sensor
+      x = pixel * (n_to_f (ordinal j) - 0.5 + rand kx) - camera.half_width
+      y = camera.half_width - pixel * (n_to_f (ordinal i) + 1.5 - rand ky)
+      ray = Ray(camera.pos, normalize [x, y, neg camera.sensor_dist])
+      trace_path params h hole room ray k_path
 
-def takePicture(
-    params:Params, h:Hamiltonian, hole:Hole, scene:Scene m, camera:Camera
-    ) -> Fin camera.numPix => Fin camera.numPix => Color given (m|Ix) =
-  rootKey = new_key 0
-  for i:(Fin camera.numPix) j:(Fin camera.numPix).
-    pixKey = if params.shareSeed
-      then rootKey
-      else ixkey (ixkey rootKey i) j
-    def sampleRayColor(k:Key) -> Color =
-      [k1, k2] = split_key(n=2, k)
-      tracePath params h hole scene (cameraRay camera i j k1) k2
-    params.exposure .* sampleAveraged sampleRayColor params.numSamples pixKey
+'## Define the room and render it
 
-'## Define the scene and render it
+lamp_glow = [0.2, 0.2, 0.2]
+red       = 1.5 .* [0.611, 0.0555, 0.062]
+green     = 1.5 .* [0.117, 0.4125, 0.115]
+cream     = [255.0, 239.0, 196.0] / 255.0
+pale_blue = [200.0, 200.0, 255.0] / 255.0
 
-lightColor = [0.2, 0.2, 0.2]
-leftWallColor  = 1.5 .* [0.611, 0.0555, 0.062]
-rightWallColor = 1.5 .* [0.117, 0.4125, 0.115]
-whiteWallColor = [255.0, 239.0, 196.0] / 255.0
-blockColor     = [200.0, 200.0, 255.0] / 255.0
-
-theScene = Scene $
-  [ Light (1.9 .* yHat) 0.5 lightColor
-  , PassiveObject (Wall      xHat  2.0) (Matte leftWallColor)
-  , PassiveObject (Wall (neg xHat) 2.0) (Matte rightWallColor)
-  , PassiveObject (Wall      yHat  2.0) (Matte whiteWallColor)
-  , PassiveObject (Wall (neg yHat) 2.0) (Matte whiteWallColor)
-  , PassiveObject (Wall      zHat  2.0) (Matte whiteWallColor)
-  , PassiveObject (Block  [ 1.0, -1.6,  1.2] [0.6, 0.8, 0.6] 0.5) (Matte blockColor)
-  , PassiveObject (Sphere [-1.0, -1.2,  0.2] 0.8) (Matte (0.7.* whiteWallColor))
-  , PassiveObject (Sphere [ 2.0,  2.0, -2.0] 1.5) (Mirror)
+the_room =
+  [ Lamp  (1.9 .* y_hat) 0.5 lamp_glow
+  , Solid (Wall      x_hat  2.0) (Matte red)
+  , Solid (Wall (neg x_hat) 2.0) (Matte green)
+  , Solid (Wall      y_hat  2.0) (Matte cream)
+  , Solid (Wall (neg y_hat) 2.0) (Matte cream)
+  , Solid (Wall      z_hat  2.0) (Matte cream)
+  , Solid (Block  [ 1.0, -1.6,  1.2] [0.6, 0.8, 0.6] 0.5) (Matte pale_blue)
+  , Solid (Sphere [-1.0, -1.2,  0.2] 0.8) (Matte (0.7 .* cream))
+  , Solid (Sphere [ 2.0,  2.0, -2.0] 1.5) Mirror
   ]
 
 # We change to a small num pix here to reduce the compute needed for tests
 params = Params 20 6 True 550.0
 camera = if dex_test_mode()
-  then Camera 8 (10.0 .* zHat) 0.3 1.0
-  else Camera 200 (10.0 .* zHat) 0.3 1.0
+  then Camera 8 (10.0 .* z_hat) 0.3 1.0
+  else Camera 200 (10.0 .* z_hat) 0.3 1.0
 
 'First the room on its own, in flat spacetime. This should look just like
 the original ray tracer's picture.
@@ -486,7 +441,7 @@ the original ray tracer's picture.
 no_hole = Hole([0.0, 0.0, 0.0], 0.0, 0.0)
 flat : Hamiltonian = \x p. minkowski(x, p)
 
-:html imshow $ takePicture params flat no_hole theScene camera
+:html imshow $ take_picture params flat no_hole the_room camera
 > <html output>
 
 'Now with a black hole. It follows a looping path around the room, and
@@ -501,5 +456,5 @@ def orbiting_hole(phase:Float) -> Hole =
 the_hole = orbiting_hole 0.2
 curved : Hamiltonian = \x p. room_kerr(the_hole, x, p)
 
-:html imshow $ takePicture params curved the_hole theScene camera
+:html imshow $ take_picture params curved the_hole the_room camera
 > <html output>
