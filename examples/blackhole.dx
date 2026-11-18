@@ -11,6 +11,7 @@ vectorize by hand but is just a loop here.
 
 import png
 import plot
+import ode
 
 def Vec(n:Nat) -> Type = Fin n => Float
 
@@ -78,30 +79,13 @@ def kerr(a:Float, x:Event, p:Covector) -> Float =
 
 '## Adaptive integration
 
-'One step of the Cash-Karp Runge-Kutta method. It returns a fifth-order
-estimate of the next state, and its difference from an embedded fourth-order
-estimate, which we use to choose the step size.
+'The `ode` library provides one step of the Dormand-Prince Runge-Kutta method,
+with an estimate of the error it made, and a rule for choosing the next step
+size from that error. We measure the error in position and in momentum
+separately and go by the worse of the two.
 
-def rk45_step(f:(v)->v, y:v, h:Float) -> (v, v) given (v|VSpace) =
-  k1 = f y
-  k2 = f $ y + h .* ((1.0 / 5.0) .* k1)
-  k3 = f $ y + h .* ((3.0 / 40.0) .* k1 + (9.0 / 40.0) .* k2)
-  k4 = f $ y + h .* ((3.0 / 10.0) .* k1 - (9.0 / 10.0) .* k2 + (6.0 / 5.0) .* k3)
-  k5 = f $ y + h .* ((-11.0 / 54.0) .* k1 + (5.0 / 2.0) .* k2 - (70.0 / 27.0) .* k3
-                     + (35.0 / 27.0) .* k4)
-  k6 = f $ y + h .* ((1631.0 / 55296.0) .* k1 + (175.0 / 512.0) .* k2
-                     + (575.0 / 13824.0) .* k3 + (44275.0 / 110592.0) .* k4
-                     + (253.0 / 4096.0) .* k5)
-  y5 = y + h .* ((37.0 / 378.0) .* k1 + (250.0 / 621.0) .* k3
-                 + (125.0 / 594.0) .* k4 + (512.0 / 1771.0) .* k6)
-  y4 = y + h .* ((2825.0 / 27648.0) .* k1 + (18575.0 / 48384.0) .* k3
-                 + (13525.0 / 55296.0) .* k4 + (277.0 / 14336.0) .* k5 + (1.0 / 4.0) .* k6)
-  (y5, y5 - y4)
-
-def error_ratio(tol:Float, s:Phase, err:Phase) -> Float =
-  def worst(y:Vec 4, e:Vec 4) -> Float =
-    maximum for i:(Fin 4). abs e[i] / (tol * (1.0 + abs y[i]))
-  max (worst (fst s) (fst err)) (worst (snd s) (snd err))
+def phase_error(tol:Float, err:Phase, s:Phase, s':Phase) -> Float =
+  max (error_ratio (fst err) tol tol (fst s) (fst s')) (error_ratio (snd err) tol tol (snd s) (snd s'))
 
 '## Following a ray
 
@@ -122,21 +106,22 @@ enum Fate =
   OutOfSteps
 
 def trace(h:Hamiltonian, scene:Scene, tol:Float, s0:Phase) -> Fate =
-  flow = \y:Phase. geodesic_flow(h, y)
-  with_state (s0, 1.0) \ref.
+  flow = \y:Phase _:Time. geodesic_flow(h, y)
+  # The solver's state: where we are, the flow there, and the step size to try.
+  with_state (s0, flow s0 0.0, 1.0) \ref.
     bounded_iter 4000 OutOfSteps \_.
-      (s, dt) = get ref
-      (s', err) = rk45_step(flow, s, dt)
-      e = error_ratio tol s' err
-      dt' = dt * clip (0.2, 4.0) (0.9 * pow e (-0.2))
+      (s, k, dt) = get ref
+      (s', k', err, _) = runge_kutta_step flow s k 0.0 dt
+      e = phase_error tol err s s'
+      dt' = optimal_step_size dt e
       if e > 1.0
         then
           # Too inaccurate. Try again with a smaller step.
-          ref := (s, dt')
+          ref := (s, k, dt')
           Continue
         else
           r' = ks_radius scene.spin (fst s')
-          ref := (s', min dt' (0.25 * (1.0 + r')))
+          ref := (s', k', min dt' (0.25 * (1.0 + r')))
           # Did this step cross the plane of the disk? If so, where?
           z  = (fst s )[3@_]
           z' = (fst s')[3@_]
@@ -162,7 +147,7 @@ no_disk = Scene(0.0, 2.02, 0.0, 0.0, 100.0)
 flat : Hamiltonian = \x p. minkowski(x, p)
 
 :p trace flat no_disk 1.0e-5 ([0.0, -50.0, 3.0, 0.0], [-1.0, 1.0, 0.0, 0.0])
-> (Escaped ([167.1618, 117.1618, 3., 0.], [-1., 1., 0., 0.]))
+> (Escaped ([166.5119, 116.5119, 3., 0.], [-1., 1., 0., 0.]))
 
 'Around a non-spinning hole, light aimed to pass the centre at a distance
 less than $3\sqrt{3} \approx 5.196$ is captured, and anything wider escapes.

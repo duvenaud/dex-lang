@@ -238,7 +238,7 @@ test-names = uexpr-tests print-tests adt-tests type-tests struct-tests cast-test
 
 doc-names = conditionals functions
 
-lib-names = complex fft netpbm plot sort diagram linalg parser png set stats
+lib-names = complex fft netpbm ode plot sort diagram linalg parser png set stats
 
 benchmark-names = \
   fused_sum gaussian jvp_matmul matmul_big matmul_small matvec_big matvec_small \

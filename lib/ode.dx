@@ -1,0 +1,159 @@
+'# Ordinary Differential Equation Solvers
+
+'Integrate systems of ordinary differential equations (ODEs) using the Dormand-Prince method for adaptive integration
+stepsize calculation.
+This version is a port of the [Jax implementation](https://github.com/google/jax/blob/4236eb2b5929b9643977553f7f988ca518b7df4e/jax/experimental/ode.py).
+
+'`odeint` solves for the state at a given list of times. Programs that need
+to stop at an event, or otherwise control the steps themselves, can build
+their own loop from `runge_kutta_step`, `error_ratio` and `optimal_step_size`.
+
+Time = Float
+
+def l2_norm(x: d=>Float) -> Float given (d|Ix) = sqrt $ sum for i:d. sq x[i]
+def (./)(x: d=>Float, y: d=>Float) -> d=>Float given (d|Ix) = for i:d. x[i] / y[i]
+
+def fit_4th_order_polynomial(z0:v, z1:v, z_mid:v, dz0:v, dz1:v, dt:Time)
+    -> (Fin 5)=>v given (v|VSpace) =
+  # dz0 and dz1 are gradient evaluations.
+  a = -2. * dt .* dz0 + 2. * dt .* dz1 -  8. .* z0 -  8. .* z1 + 16. .* z_mid
+  b =  5. * dt .* dz0 - 3. * dt .* dz1 + 18. .* z0 + 14. .* z1 - 32. .* z_mid
+  c = -4. * dt .* dz0 +      dt .* dz1 - 11. .* z0 -  5. .* z1 + 16. .* z_mid
+  d = dt .* dz0
+  e = z0
+  [a, b, c, d, e]  # polynomial coefficients.
+
+def initial_step_size(
+    fun:(d=>Float, Time) -> d=>Float,
+    t0:Time, z0:d=>Float,
+    order:Int, rtol:Float, atol:Float, f0:d=>Float
+    ) -> Time given (d|Ix) =
+  # Algorithm from: E. Hairer, S. P. Norsett G. Wanner,
+  # Solving Ordinary Differential Equations I: Nonstiff Problems, Sec. II.4.
+  scale = for i:d. atol + ((abs z0[i]) * rtol)
+  d0 = l2_norm (z0 ./ scale)
+  d1 = l2_norm (f0 ./ scale)
+  h0 = select ((d0 < 1.0e-5) || (d1 < 1.0e-5)) 1.0e-6 (0.01 * (d0 / d1))
+  z1 = z0 + h0 .* f0
+  f1 = fun z1 (t0 + h0)
+  d2 = (l2_norm ((f1 - f0) ./ scale)) / h0
+  left = max 1.0e-6 (h0 * 1.0e-3)
+  right = pow (0.01 / (d1 + d2)) (1. / ((i_to_f order) + 1.))
+  h1 = select ((d1 <= 1.0e-15) && (d2 <= 1.0e-15)) left right
+  min (100. * h0) h1
+
+def runge_kutta_step(func:(v,Time)->v, z0:v, f0:v, t0:Time, dt:Time)
+    -> (v, v, v, v) given (v|VSpace) =
+  # One step of the method, given the derivative `f0` at the start. Returns the
+  # new state, the derivative there, an estimate of the error, and the state
+  # at the midpoint of the step (used for interpolation).
+  # The stages are written out one by one. That is about ten times faster than
+  # looping over a table of coefficients, which has to build a table of the
+  # evaluations as it goes.
+  k1 = f0
+  z2 = z0 + dt .* ((1. / 5.) .* k1)
+  k2 = func z2 (t0 + dt * (1. / 5.))
+  z3 = z0 + dt .* ((3. / 40.) .* k1 + (9. / 40.) .* k2)
+  k3 = func z3 (t0 + dt * (3. / 10.))
+  z4 = z0 + dt .* ((44. / 45.) .* k1 - (56. / 15.) .* k2 + (32. / 9.) .* k3)
+  k4 = func z4 (t0 + dt * (4. / 5.))
+  z5 = z0 + dt .* ((19372. / 6561.) .* k1 - (25360. / 2187.) .* k2
+                   + (64448. / 6561.) .* k3 - (212. / 729.) .* k4)
+  k5 = func z5 (t0 + dt * (8. / 9.))
+  z6 = z0 + dt .* ((9017. / 3168.) .* k1 - (355. / 33.) .* k2 + (46732. / 5247.) .* k3
+                   + (49. / 176.) .* k4 - (5103. / 18656.) .* k5)
+  k6 = func z6 (t0 + dt)
+  z_last = z0 + dt .* ((35. / 384.) .* k1 + (500. / 1113.) .* k3 + (125. / 192.) .* k4
+                       - (2187. / 6784.) .* k5 + (11. / 84.) .* k6)
+  k7 = func z_last (t0 + dt)
+  z_last_error = dt .* (
+    (35. / 384. - 1951. / 21600.) .* k1 + (500. / 1113. - 22642. / 50085.) .* k3
+    + (125. / 192. - 451. / 720.) .* k4 + (12231. / 42400. - 2187. / 6784.) .* k5
+    + (11. / 84. - 649. / 6300.) .* k6 - (1. / 60.) .* k7)
+  z_mid = z0 + dt .* (
+    (6025192743. / 30085553152. / 2.) .* k1 + (51252292925. / 65400821598. / 2.) .* k3
+    - (2691868925. / 45128329728. / 2.) .* k4 + (187940372067. / 1594534317056. / 2.) .* k5
+    - (1776094331. / 19743644256. / 2.) .* k6 + (11237099. / 235043384. / 2.) .* k7)
+  (z_last, k7, z_last_error, z_mid)
+
+def error_ratio(
+    error_estimates:d=>Float, rtol:Float,
+    atol:Float, z0:d=>Float, z1:d=>Float)
+    -> Float given (d|Ix) =
+  err_tols = for i:d. atol + rtol * (max (abs z0[i]) (abs z1[i]))
+  err_ratios = error_estimates ./ err_tols
+  mean for i:d. sq err_ratios[i]
+
+def optimal_step_size(last_step:Time, mean_error_ratio:Float) -> Time =
+  safety = 0.9
+  ifactor = 10.
+  dfactor = 0.2
+  order = 5.
+  dfactor = select (mean_error_ratio < 1.) 1. dfactor
+  err_ratio = sqrt mean_error_ratio
+  minfac = min ( (pow err_ratio (1. / order)) / safety) (1. / dfactor)
+  factor = max (1. / ifactor) minfac
+  select (mean_error_ratio == 0.) (last_step * ifactor) (last_step / factor)
+
+
+struct ODEState(v:Type) =
+  z             : v
+  f             : v
+  t             : Time
+  dt            : Time
+  last_t        : Time
+  interp_coeffs : Fin 5 => v
+
+def odeint(
+    func: (d=>Float, Time) -> d=>Float,
+    z0: d=>Float, t0: Time, times: n=>Time
+    ) -> n=>d=>Float given (n|Ix, d|Ix) =
+  # Adaptive stepsize (Dormand-Prince) Runge-Kutta odeint implementation.
+  #  Args:
+  #    func: time derivative of the solution z at time t.
+  #    z0: the initial value for the state.
+  #    t: times for evaluation. values must be strictly increasing.
+  #  Returns:
+  #    Values of the solution at each time point in times.
+  rtol = 1.4e-8 # relative local error tolerance for solver.
+  atol = 1.4e-8 # absolute local error tolerance for solver.
+  max_iters = 10000
+  V : Type = d=>Float
+  S : Type = ODEState V
+  def integrate_to_next_time(i:n, target_t:Time, init_carry:S) -> (V, S) =
+
+    def continue_condition(state:S) -> Bool =
+      (state.t < target_t) && (state.dt > 0.0) && (ordinal i < max_iters)
+
+    def possible_step(state:S) -> S =
+      z = state.z
+      (next_z, next_f, next_z_error, z_mid) = runge_kutta_step func z state.f state.t state.dt
+      next_t = state.t + state.dt
+      ratio = error_ratio next_z_error rtol atol z next_z
+      new_interp_coeff = fit_4th_order_polynomial z next_z z_mid state.f next_f state.dt
+      new_dt = optimal_step_size state.dt ratio
+      move_state = ODEState(next_z, next_f ,  next_t, new_dt, state.t,       new_interp_coeff)
+      stay_state = ODEState(     z, state.f, state.t, new_dt, state.last_t , state.interp_coeffs)
+      select (ratio <= 1.0) move_state stay_state
+
+    # Take steps until we pass target_t
+    new_state = yield_state init_carry \stateRef.
+      iter \_.
+        state = get stateRef
+        if not (continue_condition state)
+          then Done ()
+          else
+            stateRef := possible_step state
+            Continue
+
+    # Interpolate to the target time.
+    relative_output_time = (target_t - new_state.last_t) / (new_state.t - new_state.last_t)
+    z_target = evalpoly new_state.interp_coeffs relative_output_time
+    (z_target, new_state)
+
+  f0 = func z0 t0
+  init_step = initial_step_size func t0 z0 4 rtol atol f0
+  init_interp_coeff : Fin 5 => V = zero  # dummy vals
+  init_carry = ODEState(z0, f0, t0, init_step, t0, init_interp_coeff)
+  fst $ scan(init_carry, times, integrate_to_next_time)
+

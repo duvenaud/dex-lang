@@ -12,6 +12,7 @@ straight line.
 
 import png
 import plot
+import ode
 
 '## Helper functions
 
@@ -118,23 +119,13 @@ def kerr(a:Float, x:Event, p:Covector) -> Float =
 
 '## Adaptive integration
 
-'One step of the Bogacki-Shampine Runge-Kutta method. It returns a third-order
-estimate of the next state, the flow there, and an estimate of the error. It
-needs the flow at the current state, which is the flow returned by the
-previous step, so each step costs three new evaluations.
+'The `ode` library provides one step of the Dormand-Prince Runge-Kutta method,
+with an estimate of the error it made, and a rule for choosing the next step
+size from that error. We measure the error in position and in momentum
+separately and go by the worse of the two.
 
-def bs23_step(f:(v)->v, y:v, k1:v, h:Float) -> (v, v, v) given (v|VSpace) =
-  k2 = f $ y + (h / 2.0) .* k1
-  k3 = f $ y + (3.0 * h / 4.0) .* k2
-  y' = y + h .* ((2.0 / 9.0) .* k1 + (1.0 / 3.0) .* k2 + (4.0 / 9.0) .* k3)
-  k4 = f y'
-  err = h .* ((-5.0 / 72.0) .* k1 + (1.0 / 12.0) .* k2 + (1.0 / 9.0) .* k3 - (1.0 / 8.0) .* k4)
-  (y', k4, err)
-
-def error_ratio(tol:Float, s:Phase, err:Phase) -> Float =
-  def worst(y:Vec 4, e:Vec 4) -> Float =
-    maximum for i:(Fin 4). abs e[i] / (tol * (1.0 + abs y[i]))
-  max (worst (fst s) (fst err)) (worst (snd s) (snd err))
+def phase_error(tol:Float, err:Phase, s:Phase, s':Phase) -> Float =
+  max (error_ratio (fst err) tol tol (fst s) (fst s')) (error_ratio (snd err) tol tol (snd s) (snd s'))
 
 '## Putting the hole in the room
 
@@ -274,10 +265,10 @@ enum RayMarchResult =
 def raymarch(h:Hamiltonian, hole:Hole, scene:Scene n, ray:Ray) -> RayMarchResult given (n|Ix) =
   maxIters : Nat = 300
   tol = 0.01
-  flow = \y:Phase. geodesic_flow(h, y)
+  flow = \y:Phase _:Time. geodesic_flow(h, y)
   # start a little way along the ray, to escape the surface we're leaving
   start = launch h (ray.origin + (10.0 * tol) .* ray.dir) ray.dir
-  with_state (start, flow start, 1.0) \ref.
+  with_state (start, flow start 0.0, 1.0) \ref.
     bounded_iter maxIters HitNothing \_.
       (s, k, dt) = get ref
       pos = spatial (fst s)
@@ -299,9 +290,9 @@ def raymarch(h:Hamiltonian, hole:Hole, scene:Scene n, ray:Ray) -> RayMarchResult
               Light(_, _, radiance) -> HitLight radiance
             else
               dt_try = min dt (0.9 * (max d tol) / speed)
-              (s', k', err) = bs23_step(flow, s, k, dt_try)
-              e = error_ratio 1.0e-3 s' err
-              dt' = dt_try * clip (0.2, 4.0) (0.9 * pow e (-1.0 / 3.0))
+              (s', k', err, _) = runge_kutta_step flow s k 0.0 dt_try
+              e = phase_error 1.0e-4 err s s'
+              dt' = optimal_step_size dt_try e
               if e > 1.0
                 then ref := (s, k, dt')
                 else ref := (s', k', select (dt_try < dt) dt dt')
@@ -315,15 +306,15 @@ aim by trial and error: fire a ray through empty space, see by how much it
 misses, shift the aim by that much, and repeat.
 
 def miss(h:Hamiltonian, hole:Hole, origin:Position, aim:Position, target:Position) -> Vec 3 =
-  flow = \y:Phase. geodesic_flow(h, y)
+  flow = \y:Phase _:Time. geodesic_flow(h, y)
   start = launch h origin (normalize (aim - origin))
-  with_state (start, flow start, 0.5) \ref.
+  with_state (start, flow start 0.0, 0.5) \ref.
     bounded_iter 100 zero \_.
       (s, k, dt) = get ref
       pos = spatial (fst s)
-      (s', k', err) = bs23_step(flow, s, k, dt)
-      e = error_ratio 1.0e-3 s' err
-      dt' = dt * clip (0.2, 4.0) (0.9 * pow e (-1.0 / 3.0))
+      (s', k', err, _) = runge_kutta_step flow s k 0.0 dt
+      e = phase_error 1.0e-4 err s s'
+      dt' = optimal_step_size dt e
       step = spatial (fst s') - pos
       # how far along this step is the closest approach to the target?
       t = dot (target - pos) step / dot step step
