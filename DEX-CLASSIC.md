@@ -16,6 +16,11 @@ programs can be written and run while the compiler rewrite on
 - `examples/blackhole-room.dx`: the same black hole inside the room from
   `examples/raytrace.dx`.
 - `misc/blackhole-room-film.sh`: renders a film of that room.
+- `lib/simplex.dx`: a linear programming solver, rewritten from the old
+  `examples/simplex.dx`, whose syntax no longer existed. The tableau's rows
+  and columns are indexed by enums.
+- `examples/physics.dx`: disks falling into a box, where each time step is a
+  linear program solved by that library.
 - The notebook frontend typesets LaTeX in prose again.
 
 ## Running things
@@ -34,8 +39,9 @@ this branch from scratch has not been tried since.
 ## What works
 
 These reproduce their expected output exactly: the examples `mandelbrot`, `pi`,
-`sierpinski`, `mcmc`, `raytrace`, `ode-integrator`, `blackhole` and
-`blackhole-room`, and the tests `set-tests` and `fft-tests`.
+`sierpinski`, `mcmc`, `raytrace`, `ode-integrator`, `blackhole`,
+`blackhole-room`, `simplex` and `physics`, and the tests `set-tests` and
+`fft-tests`.
 
 ## Known problems
 
@@ -48,6 +54,7 @@ These reproduce their expected output exactly: the examples `mandelbrot`, `pi`,
   (`psd`, `kernelregression`, `linear-maps`, `linalg-tests`) fail to load.
 - Comparison operators bind more tightly than arithmetic in some positions:
   `a + b < c` can parse as `a + (b < c)`. Parenthesize.
+- `/` only divides by a single-precision `Float`. For `Float64`, use `divide`.
 - `-O` prints a stray `> []` after each definition, so `make run-examples/...`,
   which passes `-O`, fails for every example.
 - `misc/check-quine` uses a GNU-only option of `diff` and fails on macOS.

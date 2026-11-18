@@ -1,0 +1,230 @@
+'# A Physics Engine from a Linear Program
+
+'Disks fall into a box, bounce off some pegs and each other, and settle into
+a pile. There is no collision response code here. At every time step, each
+disk says where it would like to go, and a linear program finds the
+arrangement closest to those wishes in which nothing overlaps. The linear
+program is solved by the `simplex` library.
+
+import png
+import plot
+import simplex
+
+Point = Fin 2 => Float
+
+def length(v:Point) -> Float = sqrt $ sum for i:(Fin 2). sq v[i]
+def normalize(v:Point) -> Point = v / length v
+
+'## The world
+
+'A wall is a line with a side that things have to stay on: the side its
+normal points to. A peg is a disk that doesn't move.
+
+struct Wall =
+  normal : Point
+  offset : Float   # how far the line is from the origin, along the normal
+
+struct Peg =
+  center : Point
+  radius : Float
+
+struct World(n|Ix, walls|Ix, pegs|Ix) =
+  radii : n=>Float   # of the disks
+  walls : walls=>Wall
+  pegs  : pegs=>Peg
+
+struct State(n|Ix) =
+  pos : n=>Point
+  vel : n=>Point
+
+'## Contacts
+
+'Anything a disk might touch gives a constraint: a disk and a wall, a disk
+and a peg, or two disks. The set of all possible contacts is the index set
+of the linear program's constraints.
+
+enum Contact(n:Type, walls:Type, pegs:Type) =
+  WithWall(n, walls)
+  WithPeg(n, pegs)
+  WithDisk(n, n)
+
+instance Ix(Contact n walls pegs) given (n|Ix, walls|Ix, pegs|Ix)
+  def size'() = size n * (size walls + size pegs + size n)
+  def ordinal(c) = case c of
+    WithWall(i, j) -> ordinal i * size walls + ordinal j
+    WithPeg(i, j)  -> size n * size walls + ordinal i * size pegs + ordinal j
+    WithDisk(i, j) -> size n * (size walls + size pegs) + ordinal i * size n + ordinal j
+  def unsafe_from_ordinal(o) =
+    def split(o':Nat, m:Nat) -> (Nat, Nat) = (idiv o' m, rem o' m)
+    case o < (size n * size walls) of
+      True ->
+        (i, j) = split o (size walls)
+        WithWall(unsafe_from_ordinal i, unsafe_from_ordinal j)
+      False -> case o < (size n * (size walls + size pegs)) of
+        True ->
+          (i, j) = split (unsafe_nat_diff o (size n * size walls)) (size pegs)
+          WithPeg(unsafe_from_ordinal i, unsafe_from_ordinal j)
+        False ->
+          (i, j) = split (unsafe_nat_diff o (size n * (size walls + size pegs))) (size n)
+          WithDisk(unsafe_from_ordinal i, unsafe_from_ordinal j)
+
+'Each contact says that some combination of the disks' new positions has to
+be at least some amount: $\sum_i a_i \cdot x_i \ge b$. For two disks, it says
+that they must stay apart along the line that currently joins their centres.
+That is a little stricter than saying they must not overlap, but it is linear.
+
+def one_disk(i:n, a:Point) -> n=>Point given (n|Ix) =
+  for i':n. select (ordinal i == ordinal i') a zero
+
+def keep_apart(
+    world:World n walls pegs, pos:n=>Point, contact:Contact n walls pegs
+    ) -> (n=>Point, Float) given (n|Ix, walls|Ix, pegs|Ix) =
+  case contact of
+    WithWall(i, j) ->
+      wall = world.walls[j]
+      (one_disk i wall.normal, wall.offset + world.radii[i])
+    WithPeg(i, j) ->
+      peg = world.pegs[j]
+      away = normalize (pos[i] - peg.center)
+      (one_disk i away, dot away peg.center + world.radii[i] + peg.radius)
+    WithDisk(i, j) ->
+      case ordinal i < ordinal j of
+        # each pair of disks only needs to be counted once
+        False -> (zero, -1.0)
+        True ->
+          away = normalize (pos[i] - pos[j])
+          (one_disk i away - one_disk j away, world.radii[i] + world.radii[j])
+
+'## One time step
+
+'The unknowns of the linear program are how far each disk ends up from where
+it wanted to go. The simplex method needs variables that are at least zero,
+so a disk's displacement is made up of pushes along a fixed set of compass
+directions, each of them at least zero. Minimizing the total push keeps every
+disk as near to where it wanted to go as the contacts allow.
+
+def compass(d|Ix) -> d=>Point =
+  for k:d.
+    angle = 2.0 * pi * n_to_f (ordinal k) / n_to_f (size d)
+    [cos angle, sin angle]
+
+def step(
+    world:World n walls pegs, directions:d=>Point, gravity:Point, dt:Float, state:State n
+    ) -> State n given (n|Ix, walls|Ix, pegs|Ix, d|Ix) =
+  # where each disk would go if nothing were in its way
+  wish = for i:n. state.pos[i] + dt .* state.vel[i] + (dt * dt) .* gravity
+  constraints = for contact:(Contact n walls pegs).
+    (a, b) = keep_apart world state.pos contact
+    coeffs = for push:(n, d). dot a[fst push] directions[snd push]
+    Constraint(coeffs, b - sum for i:n. dot a[i] wish[i], GreaterThan)
+  total_push = for push:(n, d). 1.0
+  pos = case simplex constraints total_push Minimize of
+    Solution push -> for i:n. wish[i] + sum for k:d. push[(i, k)] .* directions[k]
+    # These shouldn't happen, since staying still is always allowed.
+    Infeasible -> state.pos
+    Unbounded  -> state.pos
+  State(pos, (pos - state.pos) / dt)
+
+def simulate(
+    world:World n walls pegs, directions:d=>Point, gravity:Point, dt:Float, start:State n, steps:Nat
+    ) -> Fin steps => n=>Point given (n|Ix, walls|Ix, pegs|Ix, d|Ix) =
+  fst $ scan(start, for i:(Fin steps). ()) \_ _ state.
+    (state.pos, step world directions gravity dt state)
+
+'## Drawing
+
+def shade(i:n) -> Color given (n|Ix) =
+  hue = n_to_f (ordinal i) / n_to_f (size n)
+  for channel:(Fin 3). 0.55 + 0.45 * cos (2.0 * pi * (hue + n_to_f (ordinal channel) / 3.0))
+
+def draw(world:World n walls pegs, pos:n=>Point, pixels:Nat
+    ) -> Fin pixels => Fin pixels => Color given (n|Ix, walls|Ix, pegs|Ix) =
+  pixel = 1.0 / n_to_f pixels
+  # how much of a pixel a disk covers, going smoothly from 0 to 1 across its edge
+  def cover(point:Point, center:Point, radius:Float) -> Float =
+    clip (0.0, 1.0) $ 0.5 + (radius - length (point - center)) / pixel
+  def paint(under:Color, over:Color, amount:Float) -> Color =
+    under + amount .* (over - under)
+  for row:(Fin pixels) col:(Fin pixels).
+    point = [pixel * (n_to_f (ordinal col) + 0.5), 1.0 - pixel * (n_to_f (ordinal row) + 0.5)]
+    yield_state [0.07, 0.08, 0.11] \color.
+      for j:pegs.
+        peg = world.pegs[j]
+        color := paint (get color) [0.45, 0.47, 0.5] (cover point peg.center peg.radius)
+      for i:n.
+        color := paint (get color) (shade i) (cover point pos[i] world.radii[i])
+
+'## A box of disks
+
+'The box is one unit wide, with a floor and two side walls but no lid. The
+disks start in a column above it, out of sight, and fall in one after another.
+
+num_disks : Nat = if dex_test_mode() then 3 else 20
+num_steps : Nat = if dex_test_mode() then 4 else 360
+
+box : Fin 3 => Wall =
+  [ Wall([ 0.0, 1.0],  0.0)    # the floor
+  , Wall([ 1.0, 0.0],  0.0)    # the left wall
+  , Wall([-1.0, 0.0], -1.0) ]  # the right wall
+
+pegs : Fin 3 => Peg =
+  [ Peg([0.30, 0.42], 0.05)
+  , Peg([0.70, 0.42], 0.05)
+  , Peg([0.50, 0.66], 0.05) ]
+
+key = new_key 0
+world = World(for i:(Fin num_disks). 0.045 + 0.04 * rand (ixkey key i), box, pegs)
+
+start : State (Fin num_disks) =
+  pos = for i:(Fin num_disks). [0.15 + 0.7 * rand (ixkey (hash key 1) i), 1.2 + 0.22 * n_to_f (ordinal i)]
+  at_rest : Fin num_disks => Point = zero
+  State(pos, at_rest)
+
+gravity : Point = [0.0, -2.5]
+dt = 1.0 / 60.0
+
+positions = simulate world (compass (Fin 16)) gravity dt start num_steps
+
+def animate(world:World n walls pegs, frames:t=>n=>Point, pixels:Nat
+    ) -> Html given (n|Ix, walls|Ix, pegs|Ix, t|Ix) =
+  # three hundredths of a second per frame
+  img_to_html $ pngs_to_gif(for i:t. img_to_png (draw world frames[i] pixels), 3)
+
+num_frames : Nat = idiv num_steps 2   # every other step
+
+:html animate world (for i:(Fin num_frames). positions[(2 * ordinal i)@_]) 200
+> <html output>
+
+'At the end nothing overlaps. This is the smallest gap between any two disks,
+which should not be less than zero by more than rounding error.
+
+def smallest_gap(radii:n=>Float, pos:n=>Point) -> Float given (n|Ix) =
+  minimum for pair:(n, n).
+    (i, j) = pair
+    select (ordinal i < ordinal j) (length (pos[i] - pos[j]) - radii[i] - radii[j]) 1.0
+
+final = positions[(unsafe_nat_diff num_steps 1)@_]
+
+:p smallest_gap world.radii final > -0.001
+> True
+
+'## Friction, by accident
+
+'Nothing above mentions friction, but the choice of compass directions acts
+like it. A disk resting on a slope wants to move straight down, and the
+cheapest way to stop it sinking in is to push it back along whichever compass
+direction is nearest to the slope's normal. If that direction is straight up,
+the two cancel exactly and the disk stays where it is. So disks stick on any
+slope shallower than half the angle between neighbouring directions.
+
+'With sixteen directions, as above, that is about 11 degrees, and the disks
+behave like slippery pebbles. With only four, it is 45 degrees: the same
+disks, dropped the same way, stack up in columns and arches.
+
+sticky = simulate world (compass (Fin 4)) gravity dt start num_steps
+
+:html imshow $ draw world sticky[(unsafe_nat_diff num_steps 1)@_] 200
+> <html output>
+
+:html imshow $ draw world final 200
+> <html output>

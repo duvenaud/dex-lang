@@ -84,14 +84,20 @@ def same(i:n, j:n) -> Bool given (n|Ix) = ordinal i == ordinal j
 'Every constraint row has one basic variable, whose value is that row's
 right-hand side. All other variables are zero.
 
+'The tableau is kept in double precision. Every pivot rewrites the whole of
+it, and after a few hundred pivots single precision is not enough.
+
+Number = Float64
+def number(x:Float) -> Number = f_to_f64 x
+
 struct Tableau(cons|Ix, vars|Ix) =
-  table  : Row cons => Col cons vars => Float
+  table  : Row cons => Col cons vars => Number
   basics : cons => Col cons vars
 
 def build_tableau(
     ineqs:cons=>Constraint vars, objective:vars=>Float, obj_type:ObjectiveType
     ) -> Tableau cons vars given (cons|Ix, vars|Ix) =
-  table = for row:(Row cons). for col:(Col cons vars). case row of
+  table = for row:(Row cons). for col:(Col cons vars). number $ case row of
     Con c ->
       # Turn every constraint into a less-than inequality.
       sign = case ineqs[c].con_type of
@@ -124,7 +130,7 @@ multiples of that constraint's row to all the others.
 
 def pivot(t:Tableau cons vars, con:cons, col:Col cons vars)
     -> Tableau cons vars given (cons|Ix, vars|Ix) =
-  pivot_row = for c:(Col cons vars). t.table[Con con, c] / t.table[Con con, col]
+  pivot_row = for c:(Col cons vars). divide(t.table[Con con, c], t.table[Con con, col])
   table = for row:(Row cons).
     case same row (Con con) of
       True  -> pivot_row
@@ -132,7 +138,7 @@ def pivot(t:Tableau cons vars, con:cons, col:Col cons vars)
         # Entries of the pivot column are set outright, so that rounding
         # errors can't leave something small where there should be nothing.
         case same c col of
-          True  -> 0.0
+          True  -> zero
           False -> t.table[row, c] - t.table[row, col] * pivot_row[c]
   basics = for c:cons. case same c con of
     True  -> col
@@ -140,32 +146,46 @@ def pivot(t:Tableau cons vars, con:cons, col:Col cons vars)
   Tableau(table, basics)
 
 'Which variable to bring into the basis, and which constraint it replaces
-the basic variable of. Ties always go to the lowest-numbered candidate
-(Bland's rule), which guarantees that the method can't cycle.
+the basic variable of. Bringing in the variable that improves the objective
+fastest usually gets there in the fewest pivots, but can go round in circles.
+Bringing in the lowest-numbered variable that improves it at all (Bland's
+rule) is slow but can't cycle. So we start with the first and fall back on
+the second.
 
-tolerance = 1.0e-5
+tolerance  : Float  = 1.0e-5   # for answers, which are in single precision
+negligible : Number = number 1.0e-9
+# Dividing by something small magnifies rounding errors, so we never pivot on it.
+too_small_to_pivot : Number = number 1.0e-7
 
 def first_such(holds:n=>Bool) -> Maybe n given (n|Ix) =
   yield_state (Nothing::Maybe n) \ref. for i:n.
     if holds[i] && is_nothing (get ref) then ref := Just i
 
-def entering(t:Tableau cons vars, objective:Row cons, artificial_ok:Bool)
+def entering(t:Tableau cons vars, objective:Row cons, artificial_ok:Bool, greedy:Bool)
     -> Maybe (Col cons vars) given (cons|Ix, vars|Ix) =
-  first_such for col:(Col cons vars).
+  best = yield_state (Nothing::Maybe (Col cons vars, Number)) \ref. for col:(Col cons vars).
     allowed = case col of
       Var _      -> True
       Slack _    -> True
       Artificial -> artificial_ok
       Value      -> False
-    allowed && (t.table[objective, col] > tolerance)
+    gain = t.table[objective, col]
+    if allowed && (gain > negligible) then
+      better = case get ref of
+        Nothing   -> True
+        Just best -> greedy && (gain > snd best)
+      if better then ref := Just (col, gain)
+  case best of
+    Nothing   -> Nothing
+    Just pair -> Just $ fst pair
 
 def leaving(t:Tableau cons vars, col:Col cons vars)
     -> Maybe cons given (cons|Ix, vars|Ix) =
   # The constraint that most limits how far the entering variable can grow.
-  best = yield_state (Nothing::Maybe (cons, Float)) \ref. for c:cons.
+  best = yield_state (Nothing::Maybe (cons, Number)) \ref. for c:cons.
     growth = t.table[Con c, col]
-    if growth > tolerance then
-      limit = t.table[Con c, Value] / growth
+    if growth > too_small_to_pivot then
+      limit = divide(t.table[Con c, Value], growth)
       better = case get ref of
         Nothing -> True
         Just best ->
@@ -188,7 +208,8 @@ def optimize(t0:Tableau cons vars, objective:Row cons, artificial_ok:Bool)
   with_state t0 \ref.
     bounded_iter max_pivots (GaveUp t0) \i.
       t = get ref
-      case entering t objective artificial_ok of
+      greedy = i < (size cons + size vars)
+      case entering t objective artificial_ok greedy of
         Nothing -> Done $ Optimal t
         Just col -> case leaving t col of
           Nothing -> Done NoLimit
@@ -207,10 +228,10 @@ it satisfies them all, and then phase 1 shrinks it. The original problem has
 a solution exactly when it can be shrunk to zero.
 
 def most_negative(t:Tableau cons vars) -> Maybe cons given (cons|Ix, vars|Ix) =
-  best = yield_state (Nothing::Maybe (cons, Float)) \ref. for c:cons.
+  best = yield_state (Nothing::Maybe (cons, Number)) \ref. for c:cons.
     value = t.table[Con c, Value]
     worse = case get ref of
-      Nothing    -> value < (neg tolerance)
+      Nothing    -> value < (zero - negligible)
       Just worst -> value < snd worst
     if worse then ref := Just (c, value)
   case best of
@@ -218,22 +239,33 @@ def most_negative(t:Tableau cons vars) -> Maybe cons given (cons|Ix, vars|Ix) =
     Just pair -> Just $ fst pair
 
 def drop_artificial(t:Tableau cons vars) -> Tableau cons vars given (cons|Ix, vars|Ix) =
-  # If the artificial variable is still basic (at zero), swap it for any
-  # other variable that appears in its row.
+  # If the artificial variable is still basic, swap it for the variable that
+  # appears most strongly in its row.
   stuck = first_such for c:cons. same t.basics[c] Artificial
   case stuck of
     Nothing -> t
     Just con ->
-      replacement = first_such for col:(Col cons vars).
+      strongest = yield_state (Nothing::Maybe (Col cons vars, Number)) \ref. for col:(Col cons vars).
         usable = case col of
           Var _      -> True
           Slack _    -> True
           Artificial -> False
           Value      -> False
-        usable && (abs t.table[Con con, col] > tolerance)
-      case replacement of
-        Nothing  -> t   # the row is empty: a constraint that says 0 = 0
-        Just col -> pivot t con col
+        strength = abs t.table[Con con, col]
+        stronger = case get ref of
+          Nothing   -> strength > too_small_to_pivot
+          Just best -> strength > snd best
+        if usable && stronger then ref := Just (col, strength)
+      case strongest of
+        Nothing   -> t   # the row is empty: a constraint that says 0 = 0
+        Just pair ->
+          # The artificial variable is zero, give or take rounding. Make it
+          # exactly zero, so that swapping it out moves nothing else.
+          table : Row cons => Col cons vars => Number = for row:(Row cons). for col:(Col cons vars).
+            case same row (Con con) && same col Value of
+              True  -> zero
+              False -> t.table[row, col]
+          pivot Tableau(table, t.basics) con (fst pair)
 
 def find_feasible(t:Tableau cons vars) -> Maybe (Tableau cons vars) given (cons|Ix, vars|Ix) =
   case most_negative t of
@@ -245,7 +277,7 @@ def find_feasible(t:Tableau cons vars) -> Maybe (Tableau cons vars) given (cons|
         GaveUp _  -> Nothing
         Optimal t' ->
           # The feasibility row's value is how large the artificial variable still is.
-          if abs t'.table[Feasibility, Value] > (10.0 * tolerance)
+          if abs t'.table[Feasibility, Value] > number tolerance
             then Nothing
             else Just $ drop_artificial t'
 
@@ -254,7 +286,7 @@ def find_feasible(t:Tableau cons vars) -> Maybe (Tableau cons vars) given (cons|
 def read_solution(t:Tableau cons vars) -> vars=>Float given (cons|Ix, vars|Ix) =
   for v:vars. sum for c:cons.
     case same t.basics[c] (Var v) of
-      True  -> t.table[Con c, Value]
+      True  -> f64_to_f t.table[Con c, Value]
       False -> 0.0
 
 def simplex(

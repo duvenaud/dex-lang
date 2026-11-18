@@ -51,7 +51,7 @@ objectives, and a column for each of the three variables, the three slacks,
 the artificial variable and the right-hand side.
 
 :t (build_tableau textbook [10.0, 12.0, 12.0] Maximize).table
-> ((Row (Fin 3)) => (Col (Fin 3) (Fin 3)) => Float32)
+> ((Row (Fin 3)) => (Col (Fin 3) (Fin 3)) => Float64)
 
 'A problem that needs the first phase, because the origin is not feasible.
 From [these notes](http://www.eng.uwaterloo.ca/~syde05/phase1.pdf).
@@ -106,7 +106,7 @@ objective = [1.1, 1.2]
 
 best = simplex pentagon objective Maximize
 :p best
-> (Solution [0.5563596, 0.7407037])
+> (Solution [0.5563597, 0.7407036])
 
 def distance(x:n=>Float, y:n=>Float) -> Float given (n|Ix) =
   sqrt $ sum for i:n. sq (x[i] - y[i])
