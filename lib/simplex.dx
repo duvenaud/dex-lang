@@ -1,0 +1,280 @@
+'# Linear Programming by the Simplex Method
+
+'Solves problems of the form: maximize (or minimize) a linear objective,
+subject to linear inequalities, over variables that are all at least zero.
+
+'The tableau's rows and columns are not numbered. A row is a particular
+constraint or one of two objectives, and a column is a particular variable, a
+particular constraint's slack, and so on. The index sets say so, which both
+documents the code and rules out indexing errors.
+
+'This is the two-phase method, roughly following
+[these notes](http://web.mit.edu/15.053/www/AMP-Chapter-02.pdf).
+It is a basic implementation, without equality constraints or upper bounds on
+variables. The tableau is dense and is rebuilt at every pivot.
+
+'## Problems and answers
+
+enum ConstraintType =
+  LessThan
+  GreaterThan
+
+enum ObjectiveType =
+  Maximize
+  Minimize
+
+struct Constraint(vars|Ix) =
+  coeffs   : vars=>Float
+  offset   : Float
+  con_type : ConstraintType
+
+enum SimplexResult(vars|Ix) =
+  Infeasible
+  Unbounded
+  Solution(vars=>Float)
+
+'## The tableau
+
+'Each constraint gets a slack variable, which takes up the difference between
+its two sides. One artificial variable is shared by all the constraints. It
+is only used for finding a first feasible point.
+
+enum Row(cons:Type) =
+  Con(cons)
+  Goal         # the objective we were asked for
+  Feasibility  # the objective of phase 1: make the artificial variable zero
+
+enum Col(cons:Type, vars:Type) =
+  Var(vars)
+  Slack(cons)
+  Artificial
+  Value        # the right-hand side
+
+instance Ix(Row cons) given (cons|Ix)
+  def size'() = size cons + 2
+  def ordinal(i) = case i of
+    Con c       -> ordinal c
+    Goal        -> size cons
+    Feasibility -> size cons + 1
+  def unsafe_from_ordinal(o) =
+    case o < size cons of
+      True  -> Con $ unsafe_from_ordinal o
+      False -> case o == size cons of
+        True  -> Goal
+        False -> Feasibility
+
+instance Ix(Col cons vars) given (cons|Ix, vars|Ix)
+  def size'() = size vars + size cons + 2
+  def ordinal(i) = case i of
+    Var v      -> ordinal v
+    Slack c    -> size vars + ordinal c
+    Artificial -> size vars + size cons
+    Value      -> size vars + size cons + 1
+  def unsafe_from_ordinal(o) =
+    case o < size vars of
+      True  -> Var $ unsafe_from_ordinal o
+      False -> case o < (size vars + size cons) of
+        True  -> Slack $ unsafe_from_ordinal $ unsafe_nat_diff o (size vars)
+        False -> case o == (size vars + size cons) of
+          True  -> Artificial
+          False -> Value
+
+def same(i:n, j:n) -> Bool given (n|Ix) = ordinal i == ordinal j
+
+'Every constraint row has one basic variable, whose value is that row's
+right-hand side. All other variables are zero.
+
+struct Tableau(cons|Ix, vars|Ix) =
+  table  : Row cons => Col cons vars => Float
+  basics : cons => Col cons vars
+
+def build_tableau(
+    ineqs:cons=>Constraint vars, objective:vars=>Float, obj_type:ObjectiveType
+    ) -> Tableau cons vars given (cons|Ix, vars|Ix) =
+  table = for row:(Row cons). for col:(Col cons vars). case row of
+    Con c ->
+      # Turn every constraint into a less-than inequality.
+      sign = case ineqs[c].con_type of
+        LessThan    ->  1.0
+        GreaterThan -> -1.0
+      case col of
+        Var v      -> sign * ineqs[c].coeffs[v]
+        Slack c'   -> select (same c c') 1.0 0.0
+        Artificial -> -1.0
+        Value      -> sign * ineqs[c].offset
+    Goal -> case col of
+      Var v -> case obj_type of
+        Maximize ->  objective[v]
+        Minimize -> -objective[v]
+      Slack _    -> 0.0
+      Artificial -> 0.0
+      Value      -> 0.0
+    Feasibility -> case col of
+      Var _      ->  0.0
+      Slack _    ->  0.0
+      Artificial -> -1.0
+      Value      ->  0.0
+  basics : cons => Col cons vars = for c:cons. Slack c
+  Tableau(table, basics)
+
+'## Pivoting
+
+'A pivot makes `col` the basic variable of constraint `con`, by adding
+multiples of that constraint's row to all the others.
+
+def pivot(t:Tableau cons vars, con:cons, col:Col cons vars)
+    -> Tableau cons vars given (cons|Ix, vars|Ix) =
+  pivot_row = for c:(Col cons vars). t.table[Con con, c] / t.table[Con con, col]
+  table = for row:(Row cons).
+    case same row (Con con) of
+      True  -> pivot_row
+      False -> for c:(Col cons vars).
+        # Entries of the pivot column are set outright, so that rounding
+        # errors can't leave something small where there should be nothing.
+        case same c col of
+          True  -> 0.0
+          False -> t.table[row, c] - t.table[row, col] * pivot_row[c]
+  basics = for c:cons. case same c con of
+    True  -> col
+    False -> t.basics[c]
+  Tableau(table, basics)
+
+'Which variable to bring into the basis, and which constraint it replaces
+the basic variable of. Ties always go to the lowest-numbered candidate
+(Bland's rule), which guarantees that the method can't cycle.
+
+tolerance = 1.0e-5
+
+def first_such(holds:n=>Bool) -> Maybe n given (n|Ix) =
+  yield_state (Nothing::Maybe n) \ref. for i:n.
+    if holds[i] && is_nothing (get ref) then ref := Just i
+
+def entering(t:Tableau cons vars, objective:Row cons, artificial_ok:Bool)
+    -> Maybe (Col cons vars) given (cons|Ix, vars|Ix) =
+  first_such for col:(Col cons vars).
+    allowed = case col of
+      Var _      -> True
+      Slack _    -> True
+      Artificial -> artificial_ok
+      Value      -> False
+    allowed && (t.table[objective, col] > tolerance)
+
+def leaving(t:Tableau cons vars, col:Col cons vars)
+    -> Maybe cons given (cons|Ix, vars|Ix) =
+  # The constraint that most limits how far the entering variable can grow.
+  best = yield_state (Nothing::Maybe (cons, Float)) \ref. for c:cons.
+    growth = t.table[Con c, col]
+    if growth > tolerance then
+      limit = t.table[Con c, Value] / growth
+      better = case get ref of
+        Nothing -> True
+        Just best ->
+          (best_c, best_limit) = best
+          lower_numbered = ordinal t.basics[c] < ordinal t.basics[best_c]
+          (limit < best_limit) || ((limit == best_limit) && lower_numbered)
+      if better then ref := Just (c, limit)
+  case best of
+    Nothing   -> Nothing
+    Just pair -> Just $ fst pair
+
+enum Progress(cons|Ix, vars|Ix) =
+  Optimal(Tableau cons vars)
+  NoLimit                      # the objective can grow without bound
+  GaveUp(Tableau cons vars)    # ran out of pivots
+
+def optimize(t0:Tableau cons vars, objective:Row cons, artificial_ok:Bool)
+    -> Progress cons vars given (cons|Ix, vars|Ix) =
+  max_pivots = 50 * (size cons + size vars + 2)
+  with_state t0 \ref.
+    bounded_iter max_pivots (GaveUp t0) \i.
+      t = get ref
+      case entering t objective artificial_ok of
+        Nothing -> Done $ Optimal t
+        Just col -> case leaving t col of
+          Nothing -> Done NoLimit
+          Just con ->
+            ref := pivot t con col
+            if (i + 1) == max_pivots
+              then Done $ GaveUp (get ref)
+              else Continue
+
+'## Finding a first feasible point
+
+'If every right-hand side is positive, then setting all the variables to zero
+satisfies every constraint and we can start there. Otherwise, the artificial
+variable is subtracted from the left of every constraint. Made large enough,
+it satisfies them all, and then phase 1 shrinks it. The original problem has
+a solution exactly when it can be shrunk to zero.
+
+def most_negative(t:Tableau cons vars) -> Maybe cons given (cons|Ix, vars|Ix) =
+  best = yield_state (Nothing::Maybe (cons, Float)) \ref. for c:cons.
+    value = t.table[Con c, Value]
+    worse = case get ref of
+      Nothing    -> value < (neg tolerance)
+      Just worst -> value < snd worst
+    if worse then ref := Just (c, value)
+  case best of
+    Nothing   -> Nothing
+    Just pair -> Just $ fst pair
+
+def drop_artificial(t:Tableau cons vars) -> Tableau cons vars given (cons|Ix, vars|Ix) =
+  # If the artificial variable is still basic (at zero), swap it for any
+  # other variable that appears in its row.
+  stuck = first_such for c:cons. same t.basics[c] Artificial
+  case stuck of
+    Nothing -> t
+    Just con ->
+      replacement = first_such for col:(Col cons vars).
+        usable = case col of
+          Var _      -> True
+          Slack _    -> True
+          Artificial -> False
+          Value      -> False
+        usable && (abs t.table[Con con, col] > tolerance)
+      case replacement of
+        Nothing  -> t   # the row is empty: a constraint that says 0 = 0
+        Just col -> pivot t con col
+
+def find_feasible(t:Tableau cons vars) -> Maybe (Tableau cons vars) given (cons|Ix, vars|Ix) =
+  case most_negative t of
+    Nothing -> Just t
+    Just con ->
+      started = pivot t con Artificial
+      case optimize started Feasibility True of
+        NoLimit   -> Nothing
+        GaveUp _  -> Nothing
+        Optimal t' ->
+          # The feasibility row's value is how large the artificial variable still is.
+          if abs t'.table[Feasibility, Value] > (10.0 * tolerance)
+            then Nothing
+            else Just $ drop_artificial t'
+
+'## The whole method
+
+def read_solution(t:Tableau cons vars) -> vars=>Float given (cons|Ix, vars|Ix) =
+  for v:vars. sum for c:cons.
+    case same t.basics[c] (Var v) of
+      True  -> t.table[Con c, Value]
+      False -> 0.0
+
+def simplex(
+    ineqs:cons=>Constraint vars, objective:vars=>Float, obj_type:ObjectiveType
+    ) -> SimplexResult vars given (cons|Ix, vars|Ix) =
+  # All variables are constrained to be at least zero.
+  case find_feasible $ build_tableau ineqs objective obj_type of
+    Nothing -> Infeasible
+    Just t -> case optimize t Goal False of
+      NoLimit    -> Unbounded
+      Optimal t' -> Solution $ read_solution t'
+      # A feasible point, though perhaps not the best one.
+      GaveUp t'  -> Solution $ read_solution t'
+
+'## Checking answers
+
+def constraints_satisfied(constraints:m=>Constraint n, x:n=>Float) -> Bool given (m|Ix, n|Ix) =
+  constraints_ok = all for c:m.
+    lhs = sum for v:n. constraints[c].coeffs[v] * x[v]
+    case constraints[c].con_type of
+      LessThan    -> lhs <= (constraints[c].offset + tolerance)
+      GreaterThan -> lhs >= (constraints[c].offset - tolerance)
+  constraints_ok && (all for i:n. x[i] >= (neg tolerance))

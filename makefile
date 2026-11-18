@@ -213,7 +213,7 @@ dexrt-llvm: src/lib/dexrt.bc
 example-names := \
   mandelbrot pi sierpinski rejection-sampler \
   regression brownian_motion particle-swarm-optimizer \
-  ode-integrator mcmc ctc raytrace blackhole blackhole-room particle-filter \
+  ode-integrator mcmc ctc raytrace blackhole blackhole-room particle-filter simplex \
   fluidsim \
   sgd nn \
   quaternions manifold-gradients schrodinger tutorial \
@@ -238,7 +238,7 @@ test-names = uexpr-tests print-tests adt-tests type-tests struct-tests cast-test
 
 doc-names = conditionals functions
 
-lib-names = complex fft netpbm ode plot sort diagram linalg parser png set stats
+lib-names = complex fft netpbm ode plot simplex sort diagram linalg parser png set stats
 
 benchmark-names = \
   fused_sum gaussian jvp_matmul matmul_big matmul_small matvec_big matvec_small \
